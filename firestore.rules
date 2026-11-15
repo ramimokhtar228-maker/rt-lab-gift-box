@@ -1,0 +1,340 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global safety net: deny everything by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        (request.auth.token.email == 'rtlabrami@gmail.com' && request.auth.token.email_verified == true)
+      );
+    }
+
+    function isOptStr(data, key, maxLen) {
+      return !(key in data) || data[key] == null || (data[key] is string && data[key].size() <= maxLen);
+    }
+
+    function isOptNum(data, key, minVal, maxVal) {
+      return !(key in data) || data[key] == null || (data[key] is number && data[key] >= minVal && data[key] <= maxVal);
+    }
+
+    function isValidPublicLabProfile(data) {
+      return data.keys().hasAll([
+        'labName',
+        'tagline',
+        'director',
+        'hotlineNumber',
+        'whatsappNumber',
+        'address',
+        'workingHours',
+        'branches',
+        'logoUrl',
+        'whatsappPatientClaimTemplate',
+        'shareBaseUrl',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'labName',
+        'tagline',
+        'director',
+        'hotlineNumber',
+        'whatsappNumber',
+        'address',
+        'workingHours',
+        'branches',
+        'logoUrl',
+        'whatsappPatientClaimTemplate',
+        'shareBaseUrl',
+        'updatedAt'
+      ]) &&
+      data.labName is string && data.labName.size() >= 1 && data.labName.size() <= 120 &&
+      data.tagline is string && data.tagline.size() <= 200 &&
+      data.director is string && data.director.size() <= 160 &&
+      data.hotlineNumber is string && data.hotlineNumber.size() <= 40 &&
+      data.whatsappNumber is string && data.whatsappNumber.size() >= 1 && data.whatsappNumber.size() <= 40 &&
+      data.address is string && data.address.size() <= 300 &&
+      data.workingHours is string && data.workingHours.size() <= 200 &&
+      data.branches is list && data.branches.size() <= 20 &&
+      (data.branches.size() == 0 || (data.branches[0] is string && data.branches[0].size() <= 160)) &&
+      data.logoUrl is string && data.logoUrl.size() <= 500000 &&
+      data.whatsappPatientClaimTemplate is string && data.whatsappPatientClaimTemplate.size() <= 2000 &&
+      data.shareBaseUrl is string && data.shareBaseUrl.size() <= 300 &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidAdminTemplates(data) {
+      return data.keys().hasAll([
+        'whatsappInviteTemplate',
+        'whatsappWinnerReplyTemplate',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'whatsappInviteTemplate',
+        'whatsappWinnerReplyTemplate',
+        'updatedAt'
+      ]) &&
+      data.whatsappInviteTemplate is string && data.whatsappInviteTemplate.size() <= 2000 &&
+      data.whatsappWinnerReplyTemplate is string && data.whatsappWinnerReplyTemplate.size() <= 2000 &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidPrize(data) {
+      return data.keys().hasAll([
+        'id',
+        'title',
+        'description',
+        'discountLabel',
+        'category',
+        'validHours',
+        'weight',
+        'stock',
+        'usedCount',
+        'active',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'id',
+        'title',
+        'description',
+        'discountLabel',
+        'category',
+        'validHours',
+        'weight',
+        'stock',
+        'usedCount',
+        'active',
+        'updatedAt'
+      ]) &&
+      isValidId(data.id) &&
+      data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
+      data.description is string && data.description.size() <= 600 &&
+      data.discountLabel is string && data.discountLabel.size() >= 1 && data.discountLabel.size() <= 80 &&
+      data.category in ['discount', 'free_test', 'package', 'home_visit', 'gift'] &&
+      data.validHours is number && data.validHours >= 1 && data.validHours <= 2160 &&
+      data.weight is number && data.weight >= 1 && data.weight <= 1000 &&
+      data.stock is number && data.stock >= 1 && data.stock <= 100000 &&
+      data.usedCount is number && data.usedCount >= 0 && data.usedCount <= 100000 &&
+      data.active is bool &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidGiftLink(data) {
+      return data.keys().hasAll([
+        'id',
+        'token',
+        'clientName',
+        'visitRef',
+        'branchName',
+        'status',
+        'createdAt',
+        'expiresAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'id',
+        'token',
+        'clientName',
+        'visitRef',
+        'branchName',
+        'status',
+        'createdAt',
+        'expiresAt',
+        'openedAt',
+        'redeemedAt',
+        'redeemedBy',
+        'appointmentAt',
+        'appointmentNote',
+        'prizeId',
+        'prizeTitle',
+        'prizeDescription',
+        'prizeDiscountLabel',
+        'prizeCategory',
+        'prizeCode',
+        'validHours',
+        'updatedAt'
+      ]) &&
+      isValidId(data.id) &&
+      data.token is string && data.token.size() >= 1 && data.token.size() <= 64 && data.token.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.clientName is string && data.clientName.size() >= 1 && data.clientName.size() <= 120 &&
+      data.visitRef is string && data.visitRef.size() <= 64 &&
+      data.branchName is string && data.branchName.size() <= 160 &&
+      data.status in ['pending', 'opened', 'redeemed', 'expired'] &&
+      data.createdAt is timestamp &&
+      data.expiresAt is string && data.expiresAt.size() >= 10 && data.expiresAt.size() <= 64 &&
+      isOptStr(data, 'openedAt', 64) &&
+      isOptStr(data, 'redeemedAt', 64) &&
+      isOptStr(data, 'redeemedBy', 120) &&
+      isOptStr(data, 'appointmentAt', 120) &&
+      isOptStr(data, 'appointmentNote', 300) &&
+      isOptStr(data, 'prizeId', 128) &&
+      isOptStr(data, 'prizeTitle', 200) &&
+      isOptStr(data, 'prizeDescription', 600) &&
+      isOptStr(data, 'prizeDiscountLabel', 80) &&
+      isOptStr(data, 'prizeCategory', 40) &&
+      isOptStr(data, 'prizeCode', 64) &&
+      isOptNum(data, 'validHours', 1, 2160) &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidContact(data) {
+      return data.keys().hasAll(['clientPhone', 'createdAt', 'updatedAt']) &&
+      data.keys().hasOnly(['clientPhone', 'createdAt', 'updatedAt']) &&
+      data.clientPhone is string && data.clientPhone.size() <= 40 &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidPrice(data) {
+      return data.keys().hasAll(['id', 'code', 'nameAr', 'category', 'price', 'active', 'updatedAt']) &&
+      data.keys().hasOnly(['id', 'code', 'nameAr', 'nameEn', 'category', 'price', 'offerPrice', 'duration', 'active', 'updatedAt']) &&
+      isValidId(data.id) &&
+      data.code is string && data.code.size() >= 1 && data.code.size() <= 64 &&
+      data.nameAr is string && data.nameAr.size() >= 1 && data.nameAr.size() <= 200 &&
+      isOptStr(data, 'nameEn', 200) &&
+      data.category is string && data.category.size() <= 80 &&
+      data.price is number && data.price >= 0 && data.price <= 1000000 &&
+      isOptNum(data, 'offerPrice', 0, 1000000) &&
+      isOptStr(data, 'duration', 120) &&
+      data.active is bool &&
+      data.updatedAt is timestamp;
+    }
+
+    match /admins/{uid} {
+      allow get: if isSignedIn() && request.auth.uid == uid;
+      allow list, write: if false;
+    }
+
+    match /publicConfig/labProfile {
+      allow get: if true;
+      allow list, delete: if false;
+      allow create, update: if isAdmin() &&
+        isValidPublicLabProfile(incoming()) &&
+        incoming().updatedAt == request.time;
+    }
+
+    match /adminSettings/templates {
+      allow get: if isAdmin();
+      allow list, delete: if false;
+      allow create, update: if isAdmin() &&
+        isValidAdminTemplates(incoming()) &&
+        incoming().updatedAt == request.time;
+    }
+
+    match /prizes/{prizeId} {
+      allow get: if isValidId(prizeId);
+      allow list: if isAdmin() || resource.data.active == true;
+      allow create: if isAdmin() &&
+        isValidId(prizeId) &&
+        isValidPrize(incoming()) &&
+        incoming().id == prizeId &&
+        incoming().updatedAt == request.time;
+      allow update: if isAdmin() &&
+        isValidId(prizeId) &&
+        isValidPrize(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().updatedAt == request.time;
+      allow delete: if isAdmin() && isValidId(prizeId);
+    }
+
+    match /giftLinks/{linkId} {
+      allow get: if isValidId(linkId);
+      allow list: if isAdmin();
+      allow create: if isValidId(linkId) &&
+        isValidGiftLink(incoming()) &&
+        incoming().id == linkId &&
+        incoming().token == linkId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        existsAfter(/databases/$(database)/documents/giftLinks/$(linkId)/private/contact) && (
+          isAdmin() ||
+          (
+            incoming().status == 'opened' &&
+            (!('redeemedAt' in incoming()) || incoming().redeemedAt == null) &&
+            (!('redeemedBy' in incoming()) || incoming().redeemedBy == null) &&
+            (!('appointmentAt' in incoming()) || incoming().appointmentAt == null) &&
+            (!('appointmentNote' in incoming()) || incoming().appointmentNote == null)
+          )
+        );
+      allow update: if isValidId(linkId) &&
+        isValidGiftLink(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().token == existing().token &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (
+            existing().status == 'pending' &&
+            incoming().status == 'opened' &&
+            (!('redeemedAt' in incoming()) || incoming().redeemedAt == null) &&
+            (!('redeemedBy' in incoming()) || incoming().redeemedBy == null) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'status',
+              'openedAt',
+              'expiresAt',
+              'prizeId',
+              'prizeTitle',
+              'prizeDescription',
+              'prizeDiscountLabel',
+              'prizeCategory',
+              'prizeCode',
+              'validHours',
+              'updatedAt'
+            ])
+          )
+        );
+      allow delete: if isAdmin() && isValidId(linkId);
+
+      match /private/contact {
+        allow get: if isAdmin() && isValidId(linkId);
+        allow list: if false;
+        allow create: if isValidId(linkId) &&
+          isValidContact(incoming()) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          (isAdmin() || existsAfter(/databases/$(database)/documents/giftLinks/$(linkId)));
+        allow update: if isAdmin() &&
+          isValidId(linkId) &&
+          isValidContact(incoming()) &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time;
+        allow delete: if isAdmin() && isValidId(linkId);
+      }
+    }
+
+    match /prices/{priceId} {
+      allow get, list: if isAdmin();
+      allow create: if isAdmin() &&
+        isValidId(priceId) &&
+        isValidPrice(incoming()) &&
+        incoming().id == priceId &&
+        incoming().updatedAt == request.time;
+      allow update: if isAdmin() &&
+        isValidId(priceId) &&
+        isValidPrice(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().updatedAt == request.time;
+      allow delete: if isAdmin() && isValidId(priceId);
+    }
+  }
+}

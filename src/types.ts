@@ -12,13 +12,10 @@ export interface LabProfile {
   workingHours: string;
   branches: string[];
   logoUrl: string;
-  shareBaseUrl?: string;
-  /** Template sent when sharing a box link with a patient */
   whatsappInviteTemplate: string;
-  /** Template sent by Admin when replying to a winner confirming prize + time limit */
   whatsappWinnerReplyTemplate: string;
-  /** Template sent by Patient to Lab WhatsApp after opening the box */
   whatsappPatientClaimTemplate: string;
+  shareBaseUrl?: string;
 }
 
 export interface Prize {
@@ -27,7 +24,6 @@ export interface Prize {
   description: string;
   discountLabel: string;
   category: PrizeCategory;
-  /** Duration in hours before the opened prize expires (e.g. 24 = 24 hours, 168 = 7 days) */
   validHours: number;
   weight: number;
   stock: number;
@@ -44,11 +40,12 @@ export interface GiftLink {
   branchName: string;
   status: LinkStatus;
   createdAt: string;
-  /** Link expiration before opening, or once opened: exact prize expiration timestamp */
   expiresAt: string;
   openedAt: string | null;
   redeemedAt: string | null;
   redeemedBy: string | null;
+  appointmentAt?: string | null;
+  appointmentNote?: string | null;
   prizeId: string | null;
   prizeTitle: string | null;
   prizeDescription: string | null;
@@ -90,6 +87,8 @@ export interface BoxPublicResponse {
   expiresAt: string;
   openedAt: string | null;
   redeemedAt: string | null;
+  appointmentAt?: string | null;
+  appointmentNote?: string | null;
   prize: {
     title: string;
     description: string;

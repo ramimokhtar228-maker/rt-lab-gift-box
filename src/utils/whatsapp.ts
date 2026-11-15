@@ -50,13 +50,11 @@ export function getTimeRemaining(expiresAt: string): {
   const hours = Math.floor((totalSec % 86400) / 3600);
   const minutes = Math.floor((totalSec % 3600) / 60);
   const seconds = totalSec % 60;
-
   const parts: string[] = [];
   if (days > 0) parts.push(`${days} يوم`);
   if (hours > 0) parts.push(`${hours} ساعة`);
   if (days === 0 && minutes > 0) parts.push(`${minutes} دقيقة`);
   const humanLabel = parts.length > 0 ? `متبقي ${parts.join(' و ')}` : `متبقي ${seconds} ثانية`;
-
   return {
     expired: false,
     totalMs: diff,
@@ -83,11 +81,11 @@ export function resolvePublicBaseUrl(serverShareBaseUrl?: string, labShareBaseUr
     return serverShareBaseUrl.trim().replace(/\/$/, '');
   }
   if (typeof window !== 'undefined') {
-    const origin = window.location.origin;
-    if (origin.includes('://ais-dev-')) {
-      return origin.replace('://ais-dev-', '://ais-pre-');
-    }
-    return origin;
+    const base = (import.meta.env.BASE_URL || '/').replace(/\/$/, '');
+    const origin = window.location.origin.includes('://ais-dev-')
+      ? window.location.origin.replace('://ais-dev-', '://ais-pre-')
+      : window.location.origin;
+    return `${origin}${base}`;
   }
   return '';
 }
@@ -133,7 +131,13 @@ export function buildBoxUrl(
         b: meta.branchName || '',
         v: meta.visitRef || '',
         e: meta.expiresAt || '',
-        ...(meta.labProfile ? { ln: meta.labProfile.labName, wa: meta.labProfile.whatsappNumber, ht: meta.labProfile.hotlineNumber } : {}),
+        ...(meta.labProfile
+          ? {
+              ln: meta.labProfile.labName,
+              wa: meta.labProfile.whatsappNumber,
+              ht: meta.labProfile.hotlineNumber,
+            }
+          : {}),
         ...(activePrizes.length > 0 ? { pz: activePrizes } : {}),
       })
     );
@@ -219,7 +223,13 @@ export function buildAdminInviteWhatsAppUrl(
 
 export function buildAdminWinnerReplyWhatsAppUrl(link: GiftLink, lab: LabProfile): string {
   const phone = formatWhatsAppPhone(link.clientPhone);
-  const text = applyTemplate(lab.whatsappWinnerReplyTemplate, {
+  const apptText = link.appointmentAt?.trim()
+    ? `\n📅 الموعد المحدد: ${link.appointmentAt.trim()}${
+        link.appointmentNote?.trim() ? ` (${link.appointmentNote.trim()})` : ''
+      }`
+    : '';
+
+  let text = applyTemplate(lab.whatsappWinnerReplyTemplate, {
     labName: lab.labName,
     clientName: link.clientName,
     prizeTitle: link.prizeTitle || 'هدية خاصة',
@@ -227,11 +237,79 @@ export function buildAdminWinnerReplyWhatsAppUrl(link: GiftLink, lab: LabProfile
     prizeCode: link.prizeCode || link.token,
     expiresAt: formatArabicDate(link.expiresAt),
     visitRef: link.visitRef,
-    branchName: boxOrLinkBranch(link),
+    branchName: link.branchName || '',
+    appointmentAt: link.appointmentAt?.trim() || 'لم يحدد بعد',
   });
+
+  if (!lab.whatsappWinnerReplyTemplate.includes('{appointmentAt}') && apptText) {
+    text = `${text}${apptText}`;
+  }
   return `https://wa.me/${phone}?text=${encodeURIComponent(text)}`;
 }
 
-function boxOrLinkBranch(link: GiftLink): string {
-  return link.branchName || '';
+function csvCell(val: string | number | null | undefined): string {
+  const str = String(val ?? '');
+  return `"${str.replace(/"/g, '""')}"`;
+}
+
+export function exportLinksExcelCsv(links: GiftLink[]): void {
+  const statusLabel = (s: GiftLink['status']) => {
+    switch (s) {
+      case 'pending':
+        return 'بانتظار الفتح';
+      case 'opened':
+        return 'كسب - بانتظار الصرف';
+      case 'redeemed':
+        return 'تم الصرف';
+      case 'expired':
+        return 'منتهي الصلاحية';
+    }
+  };
+
+  const headers = [
+    'اسم المريض',
+    'رقم الواتساب',
+    'الفرع',
+    'رقم الزيارة',
+    'الحالة',
+    'الجائزة',
+    'قيمة الخصم / الهدية',
+    'كود الجائزة',
+    'موعد الحضور / السحب',
+    'ملاحظات الموعد',
+    'تاريخ الفتح',
+    'انتهاء الصلاحية',
+    'تاريخ الصرف',
+  ];
+
+  const rows = links.map((l) =>
+    [
+      l.clientName,
+      l.clientPhone,
+      l.branchName,
+      l.visitRef,
+      statusLabel(l.status),
+      l.prizeTitle || '—',
+      l.prizeDiscountLabel || '—',
+      l.prizeCode || l.token,
+      l.appointmentAt || '—',
+      l.appointmentNote || '—',
+      formatArabicDate(l.openedAt),
+      formatArabicDate(l.expiresAt),
+      formatArabicDate(l.redeemedAt),
+    ]
+      .map(csvCell)
+      .join(',')
+  );
+
+  const csv = [headers.map(csvCell).join(','), ...rows].join('\n');
+  const blob = new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `rt-lab-patients-winners-${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }

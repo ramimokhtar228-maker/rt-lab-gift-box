@@ -1,3 +1,20 @@
+import {
+  collection,
+  deleteDoc,
+  doc,
+  getDoc,
+  getDocs,
+  onSnapshot,
+  orderBy,
+  query,
+  serverTimestamp,
+  Timestamp,
+  updateDoc,
+  where,
+  writeBatch,
+} from 'firebase/firestore';
+import { INITIAL_PRICES } from '../data/initialPrices';
+import { db, handleFirestoreError, OperationType } from '../firebase';
 import type {
   AdminDashboardData,
   BoxPublicResponse,
@@ -5,18 +22,14 @@ import type {
   GiftLink,
   LabPriceItem,
   LabProfile,
+  LinkStatus,
   Prize,
   PrizeCategory,
 } from '../types';
-import { INITIAL_PRICES } from '../../server/initialPrices';
 
-const STATIC_DB_KEY = 'rt_hb_static_db_v2';
-const DEFAULT_ADMIN_HASH = '5a0cce5b4dcbf23b13fc696bb87cd4b2d1eab6ffb993a824099938725ec5d54c';
+const DEFAULT_ASSET_LOGO = `${import.meta.env.BASE_URL || '/'}logo.jpg`;
 
-export const DEFAULT_ASSET_LOGO = `${import.meta.env.BASE_URL}logo.jpg`;
-export const DEFAULT_ASSET_ICON = `${import.meta.env.BASE_URL}icon.svg`;
-
-const DEFAULT_STATIC_PROFILE: LabProfile = {
+export const DEFAULT_LAB_PROFILE: LabProfile = {
   labName: 'معامل RT للتحاليل التشخيصية',
   tagline: 'دقة التشخيص .. رعاية متكاملة لأجل صحتك',
   director: 'د. رامي مختار — استشاري الباثولوجيا الإكلينيكية',
@@ -34,12 +47,13 @@ const DEFAULT_STATIC_PROFILE: LabProfile = {
   whatsappInviteTemplate:
     'أهلاً {clientName} 🌟\nهديتك من {labName} جاهزة الآن في صندوق السعادة 🎁\nاضغط على الرابط التالي لفتح الصندوق ومعرفة هديتك فوراً:\n{boxUrl}\n\nنتمنى لك دوام الصحة والعافية ❤️',
   whatsappWinnerReplyTemplate:
-    'ألف مبروك يا {clientName} 🎉\nتم تأكيد فوزك من {labName} بجائزة:\n🎁 {prizeTitle} ({discountLabel})\n🔑 كود الجائزة: {prizeCode}\n⏳ الجائزة متاحة لوقت محدد وتنتهي صلاحيتها في: {expiresAt}\n\nيسعدنا تشريفك في أقرب فرع أو حجز السحب المنزلي قبل انتهاء الموعد!',
+    'ألف مبروك يا {clientName} 🎉\nتم تأكيد فوزك من {labName} بجائزة:\n🎁 {prizeTitle} ({discountLabel})\n🔑 كود الجائزة: {prizeCode}\n⏳ الجائزة متاحة لوقت محدد وتنتهي صلاحيتها في: {expiresAt}\n📅 الموعد المحدد: {appointmentAt}\n\nيسعدنا تشريفك في أقرب فرع أو حجز السحب المنزلي قبل انتهاء الموعد!',
   whatsappPatientClaimTemplate:
     'مرحباً {labName}، فتحت صندوق السعادة وكسبت الجائزة التالية:\nالاسم: {clientName}\nالجائزة: {prizeTitle} ({discountLabel})\nكود الجائزة: {prizeCode}\nصالحة حتى: {expiresAt}\nأرغب في تأكيد تفعيل الجائزة وحجز الموعد.',
+  shareBaseUrl: '',
 };
 
-const DEFAULT_STATIC_PRIZES: Prize[] = [
+export const DEFAULT_PRIZES: Prize[] = [
   {
     id: 'prz_cbc_free',
     title: 'تحليل صورة دم كاملة (CBC) مجاناً',
@@ -102,141 +116,7 @@ const DEFAULT_STATIC_PRIZES: Prize[] = [
   },
 ];
 
-interface StaticDb {
-  adminHash: string;
-  labProfile: LabProfile;
-  prizes: Prize[];
-  giftLinks: GiftLink[];
-  prices: LabPriceItem[];
-}
-
-function isStaticHostOnly(): boolean {
-  if (typeof window === 'undefined') return false;
-  return window.location.hostname.endsWith('.github.io');
-}
-
-function sha256Fallback(ascii: string): string {
-  const bytes = new TextEncoder().encode(ascii);
-  const words: number[] = [];
-  for (let i = 0; i < bytes.length; i++) {
-    words[i >> 2] |= bytes[i] << (24 - (i % 4) * 8);
-  }
-  const bitLen = bytes.length * 8;
-  words[bitLen >> 5] |= 0x80 << (24 - (bitLen % 32));
-  words[(((bitLen + 64) >> 9) << 4) + 15] = bitLen;
-
-  const k = [
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-  ];
-  const h = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
-  const rr = (n: number, c: number) => (n >>> c) | (n << (32 - c));
-
-  for (let i = 0; i < words.length; i += 16) {
-    const w = new Array<number>(64);
-    for (let t = 0; t < 16; t++) w[t] = words[i + t] | 0;
-    for (let t = 16; t < 64; t++) {
-      const s0 = rr(w[t - 15], 7) ^ rr(w[t - 15], 18) ^ (w[t - 15] >>> 3);
-      const s1 = rr(w[t - 2], 17) ^ rr(w[t - 2], 19) ^ (w[t - 2] >>> 10);
-      w[t] = (w[t - 16] + s0 + w[t - 7] + s1) | 0;
-    }
-    let [a, b, c, d, e, f, g, j] = h;
-    for (let t = 0; t < 64; t++) {
-      const S1 = rr(e, 6) ^ rr(e, 11) ^ rr(e, 25);
-      const ch = (e & f) ^ (~e & g);
-      const temp1 = (j + S1 + ch + k[t] + w[t]) | 0;
-      const S0 = rr(a, 2) ^ rr(a, 13) ^ rr(a, 22);
-      const maj = (a & b) ^ (a & c) ^ (b & c);
-      const temp2 = (S0 + maj) | 0;
-      j = g; g = f; f = e; e = (d + temp1) | 0; d = c; c = b; b = a; a = (temp1 + temp2) | 0;
-    }
-    h[0] = (h[0] + a) | 0; h[1] = (h[1] + b) | 0; h[2] = (h[2] + c) | 0; h[3] = (h[3] + d) | 0;
-    h[4] = (h[4] + e) | 0; h[5] = (h[5] + f) | 0; h[6] = (h[6] + g) | 0; h[7] = (h[7] + j) | 0;
-  }
-  return h.map((v) => (v >>> 0).toString(16).padStart(8, '0')).join('');
-}
-
-async function sha256Hex(text: string): Promise<string> {
-  const clean = text.trim();
-  if (typeof crypto !== 'undefined' && crypto.subtle) {
-    try {
-      const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(clean));
-      return Array.from(new Uint8Array(buf))
-        .map((b) => b.toString(16).padStart(2, '0'))
-        .join('');
-    } catch {
-      return sha256Fallback(clean);
-    }
-  }
-  return sha256Fallback(clean);
-}
-
-function readStaticDb(): StaticDb {
-  const now = Date.now();
-  const seed: StaticDb = {
-    adminHash: DEFAULT_ADMIN_HASH,
-    labProfile: { ...DEFAULT_STATIC_PROFILE },
-    prizes: DEFAULT_STATIC_PRIZES.map((p) => ({ ...p })),
-    giftLinks: [
-      {
-        id: 'lnk_demo_ready',
-        token: 'RTBOX-DEMO2026',
-        clientName: 'عميلنا العزيز',
-        clientPhone: '01000000000',
-        visitRef: 'RT-1001',
-        branchName: DEFAULT_STATIC_PROFILE.branches[0],
-        status: 'pending',
-        createdAt: new Date(now - 3600_000).toISOString(),
-        expiresAt: new Date(now + 30 * 24 * 3600_000).toISOString(),
-        openedAt: null,
-        redeemedAt: null,
-        redeemedBy: null,
-        prizeId: null,
-        prizeTitle: null,
-        prizeDescription: null,
-        prizeDiscountLabel: null,
-        prizeCategory: null,
-        prizeCode: null,
-        validHours: null,
-      },
-    ],
-    prices: INITIAL_PRICES.map((p) => ({ ...p })),
-  };
-
-  try {
-    const raw = window.localStorage.getItem(STATIC_DB_KEY);
-    if (!raw) {
-      window.localStorage.setItem(STATIC_DB_KEY, JSON.stringify(seed));
-      return seed;
-    }
-    const parsed = JSON.parse(raw) as Partial<StaticDb>;
-    return {
-      adminHash: parsed.adminHash || seed.adminHash,
-      labProfile: { ...DEFAULT_STATIC_PROFILE, ...(parsed.labProfile || {}) },
-      prizes: Array.isArray(parsed.prizes) && parsed.prizes.length > 0 ? parsed.prizes : seed.prizes,
-      giftLinks: Array.isArray(parsed.giftLinks) ? parsed.giftLinks : seed.giftLinks,
-      prices: Array.isArray(parsed.prices) && parsed.prices.length > 3 ? parsed.prices : seed.prices,
-    };
-  } catch {
-    return seed;
-  }
-}
-
-function writeStaticDb(db: StaticDb): void {
-  try {
-    window.localStorage.setItem(STATIC_DB_KEY, JSON.stringify(db));
-  } catch {
-    // ignore storage quota errors
-  }
-}
-
-function decodeBoxData(encoded?: string | null): {
+interface DecodedBoxPayload {
   n?: string;
   p?: string;
   b?: string;
@@ -246,18 +126,31 @@ function decodeBoxData(encoded?: string | null): {
   wa?: string;
   ht?: string;
   pz?: Array<[string, string, number, number]>;
-} | null {
+}
+
+function decodeBoxData(encoded?: string | null): DecodedBoxPayload | null {
   if (!encoded) return null;
   try {
     const b64 = encoded.replace(/-/g, '+').replace(/_/g, '/');
-    const bin = atob(b64);
+    const pad = b64.length % 4 === 0 ? '' : '='.repeat(4 - (b64.length % 4));
+    const bin = atob(b64 + pad);
     const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    for (let i = 0; i < bin.length; i++) {
+      bytes[i] = bin.charCodeAt(i);
+    }
     const json = new TextDecoder().decode(bytes);
-    return JSON.parse(json);
+    return JSON.parse(json) as DecodedBoxPayload;
   } catch {
     return null;
   }
+}
+
+function normalizeId(raw: string): string {
+  return raw
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_-]/g, '')
+    .slice(0, 64);
 }
 
 function randomCode(prefix: string, len: number): string {
@@ -267,6 +160,49 @@ function randomCode(prefix: string, len: number): string {
     out += chars[Math.floor(Math.random() * chars.length)];
   }
   return `${prefix}${out}`;
+}
+
+function timestampToIso(val: unknown): string {
+  if (!val) return new Date().toISOString();
+  if (val instanceof Timestamp) return val.toDate().toISOString();
+  if (typeof val === 'string') return val;
+  if (typeof val === 'object' && val !== null && 'toDate' in val && typeof (val as { toDate: () => Date }).toDate === 'function') {
+    return (val as { toDate: () => Date }).toDate().toISOString();
+  }
+  return new Date().toISOString();
+}
+
+function docToGiftLink(id: string, data: Record<string, unknown>, clientPhone = ''): GiftLink {
+  const rawStatus = (data.status as LinkStatus) || 'pending';
+  const expiresAt = String(data.expiresAt || new Date().toISOString());
+  const isExpired =
+    (rawStatus === 'pending' || rawStatus === 'opened') &&
+    !Number.isNaN(new Date(expiresAt).getTime()) &&
+    new Date(expiresAt).getTime() < Date.now();
+
+  return {
+    id,
+    token: String(data.token || id),
+    clientName: String(data.clientName || 'عميلنا العزيز'),
+    clientPhone,
+    visitRef: String(data.visitRef || ''),
+    branchName: String(data.branchName || ''),
+    status: isExpired ? 'expired' : rawStatus,
+    createdAt: timestampToIso(data.createdAt),
+    expiresAt,
+    openedAt: data.openedAt ? String(data.openedAt) : null,
+    redeemedAt: data.redeemedAt ? String(data.redeemedAt) : null,
+    redeemedBy: data.redeemedBy ? String(data.redeemedBy) : null,
+    appointmentAt: data.appointmentAt ? String(data.appointmentAt) : null,
+    appointmentNote: data.appointmentNote ? String(data.appointmentNote) : null,
+    prizeId: data.prizeId ? String(data.prizeId) : null,
+    prizeTitle: data.prizeTitle ? String(data.prizeTitle) : null,
+    prizeDescription: data.prizeDescription ? String(data.prizeDescription) : null,
+    prizeDiscountLabel: data.prizeDiscountLabel ? String(data.prizeDiscountLabel) : null,
+    prizeCategory: (data.prizeCategory as PrizeCategory) || null,
+    prizeCode: data.prizeCode ? String(data.prizeCode) : null,
+    validHours: typeof data.validHours === 'number' ? data.validHours : null,
+  };
 }
 
 function toPublicBox(lnk: GiftLink): BoxPublicResponse {
@@ -280,6 +216,8 @@ function toPublicBox(lnk: GiftLink): BoxPublicResponse {
     expiresAt: lnk.expiresAt,
     openedAt: lnk.openedAt,
     redeemedAt: lnk.redeemedAt,
+    appointmentAt: lnk.appointmentAt ?? null,
+    appointmentNote: lnk.appointmentNote ?? null,
     prize: lnk.prizeTitle
       ? {
           title: lnk.prizeTitle,
@@ -293,16 +231,46 @@ function toPublicBox(lnk: GiftLink): BoxPublicResponse {
   };
 }
 
-function hydrateStaticLink(db: StaticDb, token: string, encodedData?: string | null): GiftLink | null {
-  const clean = token.trim().toUpperCase();
-  const decoded = decodeBoxData(encodedData);
-  if (!decoded && !clean.startsWith('RTBOX-')) return null;
+function pickWeightedPrize(prizes: Prize[]): Prize {
+  const active = prizes.filter((p) => p.active);
+  const pool = active.length > 0 ? active : DEFAULT_PRIZES;
+  const totalW = pool.reduce((s, p) => s + Math.max(1, p.weight), 0);
+  let r = Math.random() * totalW;
+  for (const p of pool) {
+    r -= Math.max(1, p.weight);
+    if (r <= 0) return p;
+  }
+  return pool[0];
+}
 
-  if (decoded?.ln) db.labProfile.labName = decoded.ln;
-  if (decoded?.wa) db.labProfile.whatsappNumber = decoded.wa;
-  if (decoded?.ht) db.labProfile.hotlineNumber = decoded.ht;
+async function fetchActivePrizes(encodedData?: string | null): Promise<Prize[]> {
+  try {
+    const q = query(collection(db, 'prizes'), where('active', '==', true));
+    const snap = await getDocs(q);
+    if (!snap.empty) {
+      return snap.docs.map((d) => {
+        const data = d.data();
+        return {
+          id: d.id,
+          title: String(data.title || ''),
+          description: String(data.description || ''),
+          discountLabel: String(data.discountLabel || 'هدية خاصة'),
+          category: (data.category as PrizeCategory) || 'discount',
+          validHours: Number(data.validHours || 48),
+          weight: Number(data.weight || 20),
+          stock: Number(data.stock || 50),
+          usedCount: Number(data.usedCount || 0),
+          active: Boolean(data.active),
+        };
+      });
+    }
+  } catch (err) {
+    console.warn('Fallback to default prizes:', err);
+  }
+
+  const decoded = decodeBoxData(encodedData);
   if (Array.isArray(decoded?.pz) && decoded.pz.length > 0) {
-    db.prizes = decoded.pz.map(([title, discountLabel, validHours, weight], idx) => ({
+    return decoded.pz.map(([title, discountLabel, validHours, weight], idx) => ({
       id: `prz_url_${idx}`,
       title,
       description: `${title} — جائزة صالحة للاستخدام خلال الوقت المحدد.`,
@@ -316,245 +284,666 @@ function hydrateStaticLink(db: StaticDb, token: string, encodedData?: string | n
     }));
   }
 
-  const now = Date.now();
-  const lnk: GiftLink = {
-    id: `lnk_${Date.now().toString(36)}`,
-    token: clean,
-    clientName: decoded?.n || 'عميلنا العزيز',
-    clientPhone: decoded?.p || '01000000000',
-    visitRef: decoded?.v || `RT-${Math.floor(1000 + Math.random() * 9000)}`,
-    branchName: decoded?.b || db.labProfile.branches[0] || 'الفرع الرئيسي',
-    status: 'pending',
-    createdAt: new Date(now).toISOString(),
-    expiresAt:
-      decoded?.e && !Number.isNaN(new Date(decoded.e).getTime())
-        ? new Date(decoded.e).toISOString()
-        : new Date(now + 14 * 24 * 3600_000).toISOString(),
-    openedAt: null,
-    redeemedAt: null,
-    redeemedBy: null,
-    prizeId: null,
-    prizeTitle: null,
-    prizeDescription: null,
-    prizeDiscountLabel: null,
-    prizeCategory: null,
-    prizeCode: null,
-    validHours: null,
-  };
-  db.giftLinks.unshift(lnk);
-  writeStaticDb(db);
-  return lnk;
+  return DEFAULT_PRIZES;
 }
 
-async function fetchJsonSafe(url: string, init?: RequestInit): Promise<{ ok: boolean; status: number; data: Record<string, unknown> } | null> {
-  if (isStaticHostOnly()) return null;
-  try {
-    const res = await fetch(url, init);
-    const ct = res.headers.get('content-type') || '';
-    if (!ct.includes('application/json')) return null;
-    const data = await res.json();
-    return { ok: res.ok, status: res.status, data };
-  } catch {
-    return null;
-  }
-}
-
-function getStaticShareBase(): string {
+function getAppShareBase(): string {
   if (typeof window === 'undefined') return '';
   const base = import.meta.env.BASE_URL || '/';
-  return `${window.location.origin}${base === '/' ? '' : base.replace(/\/$/, '')}`;
+  const origin = window.location.origin.includes('://ais-dev-')
+    ? window.location.origin.replace('://ais-dev-', '://ais-pre-')
+    : window.location.origin;
+  return `${origin}${base === '/' ? '' : base.replace(/\/$/, '')}`;
+}
+
+function buildPublicProfilePayload(profile: LabProfile) {
+  return {
+    labName: String(profile.labName || DEFAULT_LAB_PROFILE.labName).slice(0, 120),
+    tagline: String(profile.tagline || '').slice(0, 200),
+    director: String(profile.director || '').slice(0, 160),
+    hotlineNumber: String(profile.hotlineNumber || '').slice(0, 40),
+    whatsappNumber: String(profile.whatsappNumber || DEFAULT_LAB_PROFILE.whatsappNumber).slice(0, 40),
+    address: String(profile.address || '').slice(0, 300),
+    workingHours: String(profile.workingHours || '').slice(0, 200),
+    branches: Array.isArray(profile.branches)
+      ? profile.branches.slice(0, 20).map((b) => String(b).slice(0, 160))
+      : DEFAULT_LAB_PROFILE.branches,
+    logoUrl: String(profile.logoUrl || DEFAULT_ASSET_LOGO).slice(0, 500000),
+    whatsappPatientClaimTemplate: String(profile.whatsappPatientClaimTemplate || '').slice(0, 2000),
+    shareBaseUrl: String(profile.shareBaseUrl || '').slice(0, 300),
+    updatedAt: serverTimestamp(),
+  };
+}
+
+function buildAdminTemplatesPayload(profile: LabProfile) {
+  return {
+    whatsappInviteTemplate: String(profile.whatsappInviteTemplate || '').slice(0, 2000),
+    whatsappWinnerReplyTemplate: String(profile.whatsappWinnerReplyTemplate || '').slice(0, 2000),
+    updatedAt: serverTimestamp(),
+  };
+}
+
+function mergePricesWithInitial(overrides: LabPriceItem[]): LabPriceItem[] {
+  const map = new Map<string, LabPriceItem>();
+  for (const base of INITIAL_PRICES) {
+    map.set(base.id, { ...base });
+  }
+  for (const ov of overrides) {
+    if (!ov.active) {
+      map.delete(ov.id);
+    } else {
+      map.set(ov.id, { ...ov });
+    }
+  }
+  return Array.from(map.values());
 }
 
 export const apiClient = {
   async getPublicConfig(encodedData?: string | null): Promise<{ labProfile: LabProfile; shareBaseUrl: string }> {
-    const remote = await fetchJsonSafe('/api/public/config');
-    if (remote && remote.data?.labProfile) {
-      return {
-        labProfile: remote.data.labProfile as LabProfile,
-        shareBaseUrl: String(remote.data.shareBaseUrl || ''),
-      };
+    const profile: LabProfile = { ...DEFAULT_LAB_PROFILE };
+    try {
+      const snap = await getDoc(doc(db, 'publicConfig', 'labProfile'));
+      if (snap.exists()) {
+        const d = snap.data();
+        profile.labName = String(d.labName || profile.labName);
+        profile.tagline = String(d.tagline ?? profile.tagline);
+        profile.director = String(d.director ?? profile.director);
+        profile.hotlineNumber = String(d.hotlineNumber ?? profile.hotlineNumber);
+        profile.whatsappNumber = String(d.whatsappNumber || profile.whatsappNumber);
+        profile.address = String(d.address ?? profile.address);
+        profile.workingHours = String(d.workingHours ?? profile.workingHours);
+        profile.branches = Array.isArray(d.branches) ? d.branches.map(String) : profile.branches;
+        profile.logoUrl = String(d.logoUrl || profile.logoUrl);
+        profile.whatsappPatientClaimTemplate = String(
+          d.whatsappPatientClaimTemplate ?? profile.whatsappPatientClaimTemplate
+        );
+        profile.shareBaseUrl = String(d.shareBaseUrl ?? '');
+      }
+    } catch (err) {
+      console.warn('Using default public config:', err);
     }
-    const db = readStaticDb();
+
     const decoded = decodeBoxData(encodedData);
     if (decoded) {
-      if (decoded.ln) db.labProfile.labName = decoded.ln;
-      if (decoded.wa) db.labProfile.whatsappNumber = decoded.wa;
-      if (decoded.ht) db.labProfile.hotlineNumber = decoded.ht;
+      if (decoded.ln) profile.labName = decoded.ln;
+      if (decoded.wa) profile.whatsappNumber = decoded.wa;
+      if (decoded.ht) profile.hotlineNumber = decoded.ht;
     }
-    return { labProfile: db.labProfile, shareBaseUrl: getStaticShareBase() };
+
+    return {
+      labProfile: profile,
+      shareBaseUrl: profile.shareBaseUrl || getAppShareBase(),
+    };
   },
 
-  async getBoxByToken(token: string, encodedData?: string | null): Promise<{ ok: boolean; box?: BoxPublicResponse; message?: string }> {
-    const qs = encodedData ? `?d=${encodeURIComponent(encodedData)}` : '';
-    const remote = await fetchJsonSafe(`/api/box/${encodeURIComponent(token)}${qs}`);
-    if (remote) {
-      return remote.data as { ok: boolean; box?: BoxPublicResponse; message?: string };
+  async getBoxByToken(
+    token: string,
+    encodedData?: string | null
+  ): Promise<{ ok: boolean; box?: BoxPublicResponse; message?: string }> {
+    const clean = normalizeId(token);
+    if (!clean) {
+      return { ok: false, message: 'رابط صندوق السعادة غير صحيح.' };
     }
-    const db = readStaticDb();
-    const clean = token.trim().toUpperCase();
-    let lnk = db.giftLinks.find((l) => l.token.toUpperCase() === clean) || null;
-    if (!lnk) lnk = hydrateStaticLink(db, clean, encodedData);
-    if (!lnk) return { ok: false, message: 'رابط صندوق السعادة غير صحيح أو غير موجود.' };
-    if ((lnk.status === 'pending' || lnk.status === 'opened') && new Date(lnk.expiresAt).getTime() < Date.now()) {
-      lnk.status = 'expired';
-      writeStaticDb(db);
-    }
-    return { ok: true, box: toPublicBox(lnk) };
-  },
 
-  async openBoxByToken(token: string, encodedData?: string | null): Promise<{ ok: boolean; box?: BoxPublicResponse; message?: string }> {
-    const remote = await fetchJsonSafe(`/api/box/${encodeURIComponent(token)}/open`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ d: encodedData || undefined }),
-    });
-    if (remote) {
-      return remote.data as { ok: boolean; box?: BoxPublicResponse; message?: string };
-    }
-    const db = readStaticDb();
-    const clean = token.trim().toUpperCase();
-    let lnk = db.giftLinks.find((l) => l.token.toUpperCase() === clean) || null;
-    if (!lnk) lnk = hydrateStaticLink(db, clean, encodedData);
-    if (!lnk) return { ok: false, message: 'رابط صندوق السعادة غير موجود.' };
-    if (lnk.status === 'opened' || lnk.status === 'redeemed') return { ok: true, box: toPublicBox(lnk) };
-
-    const active = db.prizes.filter((p) => p.active);
-    if (active.length === 0) return { ok: false, message: 'لا توجد جوائز نشطة داخل الصندوق حالياً.' };
-    const totalW = active.reduce((s, p) => s + Math.max(1, p.weight), 0);
-    let r = Math.random() * totalW;
-    let chosen = active[0];
-    for (const p of active) {
-      r -= Math.max(1, p.weight);
-      if (r <= 0) {
-        chosen = p;
-        break;
+    const path = `giftLinks/${clean}`;
+    try {
+      const snap = await getDoc(doc(db, 'giftLinks', clean));
+      if (snap.exists()) {
+        const lnk = docToGiftLink(snap.id, snap.data());
+        return { ok: true, box: toPublicBox(lnk) };
       }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.GET, path);
     }
 
+    const decoded = decodeBoxData(encodedData);
+    if (decoded || clean === 'RTBOX-DEMO2026') {
+      const now = Date.now();
+      const preview: GiftLink = {
+        id: clean,
+        token: clean,
+        clientName: decoded?.n || 'عميلنا العزيز',
+        clientPhone: decoded?.p || '',
+        visitRef: decoded?.v || `RT-${Math.floor(1000 + Math.random() * 9000)}`,
+        branchName: decoded?.b || DEFAULT_LAB_PROFILE.branches[0],
+        status: 'pending',
+        createdAt: new Date(now).toISOString(),
+        expiresAt:
+          decoded?.e && !Number.isNaN(new Date(decoded.e).getTime())
+            ? new Date(decoded.e).toISOString()
+            : new Date(now + 14 * 24 * 3600_000).toISOString(),
+        openedAt: null,
+        redeemedAt: null,
+        redeemedBy: null,
+        prizeId: null,
+        prizeTitle: null,
+        prizeDescription: null,
+        prizeDiscountLabel: null,
+        prizeCategory: null,
+        prizeCode: null,
+        validHours: null,
+      };
+      return { ok: true, box: toPublicBox(preview) };
+    }
+
+    return { ok: false, message: 'رابط صندوق السعادة غير صحيح أو غير موجود.' };
+  },
+
+  async openBoxByToken(
+    token: string,
+    encodedData?: string | null
+  ): Promise<{ ok: boolean; box?: BoxPublicResponse; message?: string }> {
+    const clean = normalizeId(token);
+    if (!clean) {
+      return { ok: false, message: 'رابط صندوق السعادة غير صحيح.' };
+    }
+
+    const linkRef = doc(db, 'giftLinks', clean);
+    let existingSnap;
+    try {
+      existingSnap = await getDoc(linkRef);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.GET, `giftLinks/${clean}`);
+    }
+
+    if (existingSnap.exists()) {
+      const existingLnk = docToGiftLink(existingSnap.id, existingSnap.data());
+      if (existingLnk.status === 'opened' || existingLnk.status === 'redeemed') {
+        return { ok: true, box: toPublicBox(existingLnk) };
+      }
+      if (existingLnk.status === 'expired') {
+        return { ok: false, message: 'انتهت صلاحية هذا الرابط.' };
+      }
+
+      const prizes = await fetchActivePrizes(encodedData);
+      const chosen = pickWeightedPrize(prizes);
+      const now = Date.now();
+      const validHours = Math.max(1, Number(chosen.validHours || 48));
+      const openedAt = new Date(now).toISOString();
+      const expiresAt = new Date(now + validHours * 3600_000).toISOString();
+      const prizeCode = randomCode('RTWIN-', 6);
+
+      try {
+        await updateDoc(linkRef, {
+          status: 'opened',
+          openedAt,
+          expiresAt,
+          prizeId: chosen.id.slice(0, 128),
+          prizeTitle: chosen.title.slice(0, 200),
+          prizeDescription: chosen.description.slice(0, 600),
+          prizeDiscountLabel: chosen.discountLabel.slice(0, 80),
+          prizeCategory: chosen.category.slice(0, 40),
+          prizeCode,
+          validHours,
+          updatedAt: serverTimestamp(),
+        });
+      } catch (error) {
+        handleFirestoreError(error, OperationType.UPDATE, `giftLinks/${clean}`);
+      }
+
+      const updated: GiftLink = {
+        ...existingLnk,
+        status: 'opened',
+        openedAt,
+        expiresAt,
+        prizeId: chosen.id,
+        prizeTitle: chosen.title,
+        prizeDescription: chosen.description,
+        prizeDiscountLabel: chosen.discountLabel,
+        prizeCategory: chosen.category,
+        prizeCode,
+        validHours,
+      };
+      return { ok: true, box: toPublicBox(updated) };
+    }
+
+    // Hydrate legacy ?d= link or demo link into Firestore atomically so Admin sees it immediately
+    const decoded = decodeBoxData(encodedData);
+    if (!decoded && clean !== 'RTBOX-DEMO2026') {
+      return { ok: false, message: 'رابط صندوق السعادة غير موجود.' };
+    }
+
+    const prizes = await fetchActivePrizes(encodedData);
+    const chosen = pickWeightedPrize(prizes);
     const now = Date.now();
     const validHours = Math.max(1, Number(chosen.validHours || 48));
-    lnk.status = 'opened';
-    lnk.openedAt = new Date(now).toISOString();
-    lnk.expiresAt = new Date(now + validHours * 3600_000).toISOString();
-    lnk.prizeId = chosen.id;
-    lnk.prizeTitle = chosen.title;
-    lnk.prizeDescription = chosen.description;
-    lnk.prizeDiscountLabel = chosen.discountLabel;
-    lnk.prizeCategory = chosen.category;
-    lnk.prizeCode = `${randomCode('RT-', 4)}-${randomCode('', 4)}`;
-    lnk.validHours = validHours;
-    chosen.usedCount = (chosen.usedCount || 0) + 1;
-    writeStaticDb(db);
-    return { ok: true, box: toPublicBox(lnk) };
-  },
+    const openedAt = new Date(now).toISOString();
+    const expiresAt = new Date(now + validHours * 3600_000).toISOString();
+    const prizeCode = randomCode('RTWIN-', 6);
 
-  async createAndOpenSelfBox(input: { clientName: string; clientPhone: string; branchName?: string }): Promise<{ ok: boolean; box?: BoxPublicResponse; message?: string }> {
-    const remote = await fetchJsonSafe('/api/box-self-open', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(input),
-    });
-    if (remote) {
-      return remote.data as { ok: boolean; box?: BoxPublicResponse; message?: string };
-    }
-    const db = readStaticDb();
-    const token = randomCode('RTBOX-', 6);
-    const now = Date.now();
-    const lnk: GiftLink = {
-      id: `lnk_${now.toString(36)}`,
-      token,
-      clientName: input.clientName.trim(),
-      clientPhone: input.clientPhone.trim(),
-      visitRef: randomCode('SELF-', 4),
-      branchName: input.branchName || db.labProfile.branches[0] || 'الفرع الرئيسي',
-      status: 'pending',
-      createdAt: new Date(now).toISOString(),
-      expiresAt: new Date(now + 14 * 24 * 3600_000).toISOString(),
-      openedAt: null,
+    const clientName = (decoded?.n || 'عميلنا العزيز').trim().slice(0, 120);
+    const clientPhone = (decoded?.p || '').trim().slice(0, 40);
+    const visitRef = (decoded?.v || `RT-${Math.floor(1000 + Math.random() * 9000)}`).slice(0, 64);
+    const branchName = (decoded?.b || DEFAULT_LAB_PROFILE.branches[0]).slice(0, 160);
+
+    const batch = writeBatch(db);
+    batch.set(linkRef, {
+      id: clean,
+      token: clean,
+      clientName,
+      visitRef,
+      branchName,
+      status: 'opened',
+      createdAt: serverTimestamp(),
+      expiresAt,
+      openedAt,
       redeemedAt: null,
       redeemedBy: null,
-      prizeId: null,
-      prizeTitle: null,
-      prizeDescription: null,
-      prizeDiscountLabel: null,
-      prizeCategory: null,
-      prizeCode: null,
-      validHours: null,
-    };
-    db.giftLinks.unshift(lnk);
-    writeStaticDb(db);
-    return this.openBoxByToken(token);
-  },
-
-  async adminLogin(password: string): Promise<{ ok: boolean; token?: string; message?: string }> {
-    const remote = await fetchJsonSafe('/api/admin/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password }),
+      appointmentAt: null,
+      appointmentNote: null,
+      prizeId: chosen.id.slice(0, 128),
+      prizeTitle: chosen.title.slice(0, 200),
+      prizeDescription: chosen.description.slice(0, 600),
+      prizeDiscountLabel: chosen.discountLabel.slice(0, 80),
+      prizeCategory: chosen.category.slice(0, 40),
+      prizeCode,
+      validHours,
+      updatedAt: serverTimestamp(),
     });
-    if (remote) {
-      return remote.data as { ok: boolean; token?: string; message?: string };
-    }
-    const db = readStaticDb();
-    const hash = await sha256Hex(password);
-    const upperHash = await sha256Hex(password.trim().toUpperCase());
-    const matchesDefault = db.adminHash === DEFAULT_ADMIN_HASH && upperHash === DEFAULT_ADMIN_HASH;
-    if (hash !== db.adminHash && !matchesDefault) {
-      return { ok: false, message: 'كلمة مرور الإدارة غير صحيحة.' };
-    }
-    return { ok: true, token: `static_${Date.now()}` };
-  },
-
-  async getAdminDashboard(adminToken: string): Promise<{ ok: boolean; status?: number } & Partial<AdminDashboardData>> {
-    const remote = await fetchJsonSafe('/api/admin/dashboard', {
-      headers: { 'X-Admin-Token': adminToken },
+    batch.set(doc(db, 'giftLinks', clean, 'private', 'contact'), {
+      clientPhone,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
     });
-    if (remote) {
-      return { status: remote.status, ...(remote.data as { ok: boolean } & Partial<AdminDashboardData>) };
+
+    try {
+      await batch.commit();
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, `giftLinks/${clean}`);
     }
-    const db = readStaticDb();
+
     return {
       ok: true,
-      labProfile: db.labProfile,
-      prizes: db.prizes,
-      giftLinks: db.giftLinks,
-      prices: db.prices,
-      stats: {
-        totalLinks: db.giftLinks.length,
-        pendingLinks: db.giftLinks.filter((l) => l.status === 'pending').length,
-        openedLinks: db.giftLinks.filter((l) => l.status === 'opened').length,
-        redeemedLinks: db.giftLinks.filter((l) => l.status === 'redeemed').length,
-        expiredLinks: db.giftLinks.filter((l) => l.status === 'expired').length,
-        activePrizes: db.prizes.filter((p) => p.active).length,
-        totalPrices: db.prices.length,
-      },
+      box: toPublicBox({
+        id: clean,
+        token: clean,
+        clientName,
+        clientPhone,
+        visitRef,
+        branchName,
+        status: 'opened',
+        createdAt: openedAt,
+        expiresAt,
+        openedAt,
+        redeemedAt: null,
+        redeemedBy: null,
+        prizeId: chosen.id,
+        prizeTitle: chosen.title,
+        prizeDescription: chosen.description,
+        prizeDiscountLabel: chosen.discountLabel,
+        prizeCategory: chosen.category,
+        prizeCode,
+        validHours,
+      }),
     };
   },
 
-  async createAdminLink(adminToken: string, body: Record<string, unknown>): Promise<{ ok: boolean; link?: GiftLink; message?: string }> {
-    const remote = await fetchJsonSafe('/api/admin/links', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Admin-Token': adminToken },
-      body: JSON.stringify(body),
-    });
-    if (remote) return remote.data as { ok: boolean; link?: GiftLink; message?: string };
+  async createAndOpenSelfBox(payload: {
+    clientName: string;
+    clientPhone: string;
+    branchName?: string;
+  }): Promise<{ ok: boolean; box?: BoxPublicResponse; message?: string }> {
+    const cleanName = payload.clientName.trim().slice(0, 120);
+    const cleanPhone = payload.clientPhone.trim().slice(0, 40);
+    if (!cleanName || cleanPhone.replace(/\D/g, '').length < 8) {
+      return { ok: false, message: 'يرجى إدخال الاسم ورقم الواتساب بشكل صحيح.' };
+    }
 
-    const db = readStaticDb();
+    const prizes = await fetchActivePrizes();
+    const chosen = pickWeightedPrize(prizes);
+    const now = Date.now();
+    const validHours = Math.max(1, Number(chosen.validHours || 48));
+    const openedAt = new Date(now).toISOString();
+    const expiresAt = new Date(now + validHours * 3600_000).toISOString();
+    const token = randomCode('RTBOX-', 6);
+    const prizeCode = randomCode('RTWIN-', 6);
+    const visitRef = `RT-${Math.floor(1000 + Math.random() * 9000)}`;
+    const branchName = (payload.branchName || DEFAULT_LAB_PROFILE.branches[0]).slice(0, 160);
+
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'giftLinks', token), {
+      id: token,
+      token,
+      clientName: cleanName,
+      visitRef,
+      branchName,
+      status: 'opened',
+      createdAt: serverTimestamp(),
+      expiresAt,
+      openedAt,
+      redeemedAt: null,
+      redeemedBy: null,
+      appointmentAt: null,
+      appointmentNote: null,
+      prizeId: chosen.id.slice(0, 128),
+      prizeTitle: chosen.title.slice(0, 200),
+      prizeDescription: chosen.description.slice(0, 600),
+      prizeDiscountLabel: chosen.discountLabel.slice(0, 80),
+      prizeCategory: chosen.category.slice(0, 40),
+      prizeCode,
+      validHours,
+      updatedAt: serverTimestamp(),
+    });
+    batch.set(doc(db, 'giftLinks', token, 'private', 'contact'), {
+      clientPhone: cleanPhone,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+
+    try {
+      await batch.commit();
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, `giftLinks/${token}`);
+    }
+
+    return {
+      ok: true,
+      box: toPublicBox({
+        id: token,
+        token,
+        clientName: cleanName,
+        clientPhone: cleanPhone,
+        visitRef,
+        branchName,
+        status: 'opened',
+        createdAt: openedAt,
+        expiresAt,
+        openedAt,
+        redeemedAt: null,
+        redeemedBy: null,
+        prizeId: chosen.id,
+        prizeTitle: chosen.title,
+        prizeDescription: chosen.description,
+        prizeDiscountLabel: chosen.discountLabel,
+        prizeCategory: chosen.category,
+        prizeCode,
+        validHours,
+      }),
+    };
+  },
+
+  async ensureInitialSeed(): Promise<void> {
+    try {
+      const [profileSnap, templatesSnap, prizesSnap] = await Promise.all([
+        getDoc(doc(db, 'publicConfig', 'labProfile')),
+        getDoc(doc(db, 'adminSettings', 'templates')),
+        getDocs(collection(db, 'prizes')),
+      ]);
+
+      const batch = writeBatch(db);
+      let hasWrites = false;
+
+      if (!profileSnap.exists()) {
+        batch.set(doc(db, 'publicConfig', 'labProfile'), buildPublicProfilePayload(DEFAULT_LAB_PROFILE));
+        hasWrites = true;
+      }
+
+      if (!templatesSnap.exists()) {
+        batch.set(doc(db, 'adminSettings', 'templates'), buildAdminTemplatesPayload(DEFAULT_LAB_PROFILE));
+        hasWrites = true;
+      }
+
+      if (prizesSnap.empty) {
+        for (const p of DEFAULT_PRIZES) {
+          batch.set(doc(db, 'prizes', p.id), {
+            ...p,
+            updatedAt: serverTimestamp(),
+          });
+        }
+        hasWrites = true;
+      }
+
+      if (hasWrites) {
+        await batch.commit();
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'initialSeed');
+    }
+  },
+
+  subscribeAdminDashboard(
+    onData: (data: AdminDashboardData) => void,
+    onError: (err: Error) => void
+  ): () => void {
+    let publicProfile: Partial<LabProfile> = {};
+    let adminTemplates: Partial<LabProfile> = {};
+    let prizes: Prize[] = DEFAULT_PRIZES;
+    let giftLinks: GiftLink[] = [];
+    let priceOverrides: LabPriceItem[] = [];
+    const phoneCache = new Map<string, string>();
+
+    const emit = () => {
+      const labProfile: LabProfile = {
+        ...DEFAULT_LAB_PROFILE,
+        ...publicProfile,
+        ...adminTemplates,
+      };
+      const prices = mergePricesWithInitial(priceOverrides);
+
+      // Compute usedCount per prize dynamically from giftLinks
+      const usedMap = new Map<string, number>();
+      for (const lnk of giftLinks) {
+        if (lnk.prizeId) {
+          usedMap.set(lnk.prizeId, (usedMap.get(lnk.prizeId) || 0) + 1);
+        }
+      }
+      const enrichedPrizes = prizes.map((p) => ({
+        ...p,
+        usedCount: Math.max(p.usedCount, usedMap.get(p.id) || 0),
+      }));
+
+      onData({
+        labProfile,
+        prizes: enrichedPrizes,
+        giftLinks,
+        prices,
+        stats: {
+          totalLinks: giftLinks.length,
+          pendingLinks: giftLinks.filter((l) => l.status === 'pending').length,
+          openedLinks: giftLinks.filter((l) => l.status === 'opened').length,
+          redeemedLinks: giftLinks.filter((l) => l.status === 'redeemed').length,
+          expiredLinks: giftLinks.filter((l) => l.status === 'expired').length,
+          activePrizes: enrichedPrizes.filter((p) => p.active).length,
+          totalPrices: prices.filter((p) => p.active).length,
+        },
+      });
+    };
+
+    const unsubProfile = onSnapshot(
+      doc(db, 'publicConfig', 'labProfile'),
+      (snap) => {
+        if (snap.exists()) {
+          const d = snap.data();
+          publicProfile = {
+            labName: String(d.labName || DEFAULT_LAB_PROFILE.labName),
+            tagline: String(d.tagline ?? DEFAULT_LAB_PROFILE.tagline),
+            director: String(d.director ?? DEFAULT_LAB_PROFILE.director),
+            hotlineNumber: String(d.hotlineNumber ?? DEFAULT_LAB_PROFILE.hotlineNumber),
+            whatsappNumber: String(d.whatsappNumber || DEFAULT_LAB_PROFILE.whatsappNumber),
+            address: String(d.address ?? DEFAULT_LAB_PROFILE.address),
+            workingHours: String(d.workingHours ?? DEFAULT_LAB_PROFILE.workingHours),
+            branches: Array.isArray(d.branches) ? d.branches.map(String) : DEFAULT_LAB_PROFILE.branches,
+            logoUrl: String(d.logoUrl || DEFAULT_ASSET_LOGO),
+            whatsappPatientClaimTemplate: String(
+              d.whatsappPatientClaimTemplate ?? DEFAULT_LAB_PROFILE.whatsappPatientClaimTemplate
+            ),
+            shareBaseUrl: String(d.shareBaseUrl ?? ''),
+          };
+        }
+        emit();
+      },
+      (err) => {
+        try {
+          handleFirestoreError(err, OperationType.GET, 'publicConfig/labProfile');
+        } catch (wrapped) {
+          onError(wrapped as Error);
+        }
+      }
+    );
+
+    const unsubTemplates = onSnapshot(
+      doc(db, 'adminSettings', 'templates'),
+      (snap) => {
+        if (snap.exists()) {
+          const d = snap.data();
+          adminTemplates = {
+            whatsappInviteTemplate: String(
+              d.whatsappInviteTemplate ?? DEFAULT_LAB_PROFILE.whatsappInviteTemplate
+            ),
+            whatsappWinnerReplyTemplate: String(
+              d.whatsappWinnerReplyTemplate ?? DEFAULT_LAB_PROFILE.whatsappWinnerReplyTemplate
+            ),
+          };
+        }
+        emit();
+      },
+      (err) => {
+        try {
+          handleFirestoreError(err, OperationType.GET, 'adminSettings/templates');
+        } catch (wrapped) {
+          onError(wrapped as Error);
+        }
+      }
+    );
+
+    const unsubPrizes = onSnapshot(
+      collection(db, 'prizes'),
+      (snap) => {
+        if (!snap.empty) {
+          prizes = snap.docs.map((d) => {
+            const data = d.data();
+            return {
+              id: d.id,
+              title: String(data.title || ''),
+              description: String(data.description || ''),
+              discountLabel: String(data.discountLabel || 'هدية خاصة'),
+              category: (data.category as PrizeCategory) || 'discount',
+              validHours: Number(data.validHours || 48),
+              weight: Number(data.weight || 20),
+              stock: Number(data.stock || 50),
+              usedCount: Number(data.usedCount || 0),
+              active: Boolean(data.active),
+            };
+          });
+        }
+        emit();
+      },
+      (err) => {
+        try {
+          handleFirestoreError(err, OperationType.LIST, 'prizes');
+        } catch (wrapped) {
+          onError(wrapped as Error);
+        }
+      }
+    );
+
+    const unsubLinks = onSnapshot(
+      query(collection(db, 'giftLinks'), orderBy('createdAt', 'desc')),
+      async (snap) => {
+        const docs = snap.docs;
+        // Fetch private phone numbers for any uncached link IDs
+        const missingIds = docs.map((d) => d.id).filter((id) => !phoneCache.has(id));
+        if (missingIds.length > 0) {
+          await Promise.all(
+            missingIds.map(async (id) => {
+              try {
+                const contactSnap = await getDoc(doc(db, 'giftLinks', id, 'private', 'contact'));
+                if (contactSnap.exists()) {
+                  phoneCache.set(id, String(contactSnap.data().clientPhone || ''));
+                } else {
+                  phoneCache.set(id, '');
+                }
+              } catch {
+                phoneCache.set(id, '');
+              }
+            })
+          );
+        }
+
+        giftLinks = docs.map((d) => docToGiftLink(d.id, d.data(), phoneCache.get(d.id) || ''));
+        emit();
+      },
+      (err) => {
+        try {
+          handleFirestoreError(err, OperationType.LIST, 'giftLinks');
+        } catch (wrapped) {
+          onError(wrapped as Error);
+        }
+      }
+    );
+
+    const unsubPrices = onSnapshot(
+      collection(db, 'prices'),
+      (snap) => {
+        priceOverrides = snap.docs.map((d) => {
+          const data = d.data();
+          return {
+            id: d.id,
+            code: String(data.code || ''),
+            nameAr: String(data.nameAr || ''),
+            nameEn: data.nameEn ? String(data.nameEn) : undefined,
+            category: String(data.category || 'general'),
+            price: Number(data.price || 0),
+            offerPrice: typeof data.offerPrice === 'number' ? data.offerPrice : undefined,
+            duration: data.duration ? String(data.duration) : undefined,
+            active: data.active !== false,
+          };
+        });
+        emit();
+      },
+      (err) => {
+        try {
+          handleFirestoreError(err, OperationType.LIST, 'prices');
+        } catch (wrapped) {
+          onError(wrapped as Error);
+        }
+      }
+    );
+
+    return () => {
+      unsubProfile();
+      unsubTemplates();
+      unsubPrizes();
+      unsubLinks();
+      unsubPrices();
+    };
+  },
+
+  async createAdminLink(body: {
+    clientName: string;
+    clientPhone: string;
+    branchName?: string;
+    visitRef?: string;
+    linkValidDays?: number;
+  }): Promise<{ ok: boolean; link?: GiftLink; message?: string }> {
+    const clientName = String(body.clientName || '').trim().slice(0, 120);
+    const clientPhone = String(body.clientPhone || '').trim().slice(0, 40);
+    if (!clientName) {
+      return { ok: false, message: 'يرجى إدخال اسم المريض.' };
+    }
+
     const now = Date.now();
     const days = Math.max(1, Number(body.linkValidDays || 14));
-    const link: GiftLink = {
-      id: `lnk_${now.toString(36)}`,
-      token: randomCode('RTBOX-', 6),
-      clientName: String(body.clientName || '').trim(),
-      clientPhone: String(body.clientPhone || '').trim(),
-      visitRef: String(body.visitRef || `RT-${Math.floor(1000 + Math.random() * 9000)}`),
-      branchName: String(body.branchName || db.labProfile.branches[0] || ''),
+    const token = randomCode('RTBOX-', 6);
+    const visitRef = String(body.visitRef || `RT-${Math.floor(1000 + Math.random() * 9000)}`).slice(0, 64);
+    const branchName = String(body.branchName || DEFAULT_LAB_PROFILE.branches[0]).slice(0, 160);
+    const expiresAt = new Date(now + days * 24 * 3600_000).toISOString();
+
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'giftLinks', token), {
+      id: token,
+      token,
+      clientName,
+      visitRef,
+      branchName,
       status: 'pending',
-      createdAt: new Date(now).toISOString(),
-      expiresAt: new Date(now + days * 24 * 3600_000).toISOString(),
+      createdAt: serverTimestamp(),
+      expiresAt,
       openedAt: null,
       redeemedAt: null,
       redeemedBy: null,
+      appointmentAt: null,
+      appointmentNote: null,
       prizeId: null,
       prizeTitle: null,
       prizeDescription: null,
@@ -562,181 +951,399 @@ export const apiClient = {
       prizeCategory: null,
       prizeCode: null,
       validHours: null,
-    };
-    db.giftLinks.unshift(link);
-    writeStaticDb(db);
-    return { ok: true, link };
-  },
-
-  async deleteGiftLink(adminToken: string, id: string): Promise<boolean> {
-    const remote = await fetchJsonSafe(`/api/admin/links/${encodeURIComponent(id)}`, {
-      method: 'DELETE',
-      headers: { 'X-Admin-Token': adminToken },
+      updatedAt: serverTimestamp(),
     });
-    if (remote) return Boolean(remote.ok);
-    const db = readStaticDb();
-    db.giftLinks = db.giftLinks.filter((l) => l.id !== id);
-    writeStaticDb(db);
-    return true;
-  },
-
-  async redeemPrize(adminToken: string, code: string, staffName = 'استقبال المعمل'): Promise<{ ok: boolean; message: string }> {
-    const remote = await fetchJsonSafe('/api/admin/redeem', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Admin-Token': adminToken },
-      body: JSON.stringify({ code, staffName }),
+    batch.set(doc(db, 'giftLinks', token, 'private', 'contact'), {
+      clientPhone,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
     });
-    if (remote) return remote.data as { ok: boolean; message: string };
-    const db = readStaticDb();
-    const q = code.trim().toUpperCase();
-    const lnk = db.giftLinks.find((l) => l.prizeCode?.toUpperCase() === q || l.token.toUpperCase() === q);
-    if (!lnk) return { ok: false, message: 'الكود غير موجود.' };
-    lnk.status = 'redeemed';
-    lnk.redeemedAt = new Date().toISOString();
-    lnk.redeemedBy = staffName;
-    writeStaticDb(db);
-    return { ok: true, message: `تم تأكيد صرف الجائزة للمريض (${lnk.clientName}).` };
-  },
 
-  async upsertPrize(adminToken: string, prize: Partial<Prize>): Promise<{ ok: boolean; message?: string }> {
-    const remote = await fetchJsonSafe('/api/admin/prizes', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Admin-Token': adminToken },
-      body: JSON.stringify(prize),
-    });
-    if (remote) return remote.data as { ok: boolean; message?: string };
-    const db = readStaticDb();
-    if (prize.id) {
-      db.prizes = db.prizes.map((p) => (p.id === prize.id ? { ...p, ...prize } as Prize : p));
-    } else {
-      db.prizes.unshift({
-        id: `prz_${Date.now().toString(36)}`,
-        title: String(prize.title || ''),
-        description: String(prize.description || ''),
-        discountLabel: String(prize.discountLabel || 'هدية خاصة'),
-        category: (prize.category || 'discount') as PrizeCategory,
-        validHours: Math.max(1, Number(prize.validHours || 48)),
-        weight: Math.max(1, Number(prize.weight || 20)),
-        stock: Math.max(1, Number(prize.stock || 50)),
-        usedCount: 0,
-        active: prize.active ?? true,
-      });
+    try {
+      await batch.commit();
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, `giftLinks/${token}`);
     }
-    writeStaticDb(db);
-    return { ok: true };
-  },
 
-  async deletePrize(adminToken: string, id: string): Promise<boolean> {
-    const remote = await fetchJsonSafe(`/api/admin/prizes/${encodeURIComponent(id)}`, {
-      method: 'DELETE',
-      headers: { 'X-Admin-Token': adminToken },
-    });
-    if (remote) return Boolean(remote.ok);
-    const db = readStaticDb();
-    db.prizes = db.prizes.filter((p) => p.id !== id);
-    writeStaticDb(db);
-    return true;
-  },
-
-  async updateLabProfile(adminToken: string, payload: Record<string, unknown>): Promise<{ ok: boolean; labProfile?: LabProfile; message?: string }> {
-    const remote = await fetchJsonSafe('/api/admin/lab-profile', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', 'X-Admin-Token': adminToken },
-      body: JSON.stringify(payload),
-    });
-    if (remote) return remote.data as { ok: boolean; labProfile?: LabProfile; message?: string };
-    const db = readStaticDb();
-    const { newAdminPassword, ...fields } = payload;
-    db.labProfile = { ...db.labProfile, ...(fields as Partial<LabProfile>) };
-    if (typeof newAdminPassword === 'string' && newAdminPassword.trim().length >= 4) {
-      db.adminHash = await sha256Hex(newAdminPassword.trim());
-    }
-    writeStaticDb(db);
-    return { ok: true, labProfile: db.labProfile };
-  },
-
-  async upsertPriceItem(adminToken: string, item: Record<string, unknown>): Promise<{ ok: boolean; message?: string }> {
-    const remote = await fetchJsonSafe('/api/admin/prices', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Admin-Token': adminToken },
-      body: JSON.stringify(item),
-    });
-    if (remote) return remote.data as { ok: boolean; message?: string };
-    const db = readStaticDb();
-    db.prices.unshift({
-      id: `t-${Date.now().toString(36)}`,
-      code: String(item.code || `RT-${Math.floor(100 + Math.random() * 900)}`),
-      nameAr: String(item.nameAr || ''),
-      category: 'general',
-      price: Number(item.price || 0),
-      offerPrice: item.offerPrice ? Number(item.offerPrice) : undefined,
-      active: true,
-    });
-    writeStaticDb(db);
-    return { ok: true };
-  },
-
-  async bulkSavePrices(adminToken: string, prices: LabPriceItem[]): Promise<{ ok: boolean; message?: string }> {
-    const remote = await fetchJsonSafe('/api/admin/prices/bulk', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', 'X-Admin-Token': adminToken },
-      body: JSON.stringify({ prices }),
-    });
-    if (remote) return remote.data as { ok: boolean; message?: string };
-    const db = readStaticDb();
-    db.prices = prices;
-    writeStaticDb(db);
-    return { ok: true };
-  },
-
-  async deletePriceItem(adminToken: string, id: string): Promise<boolean> {
-    const remote = await fetchJsonSafe(`/api/admin/prices/${encodeURIComponent(id)}`, {
-      method: 'DELETE',
-      headers: { 'X-Admin-Token': adminToken },
-    });
-    if (remote) return Boolean(remote.ok);
-    const db = readStaticDb();
-    db.prices = db.prices.filter((p) => p.id !== id);
-    writeStaticDb(db);
-    return true;
-  },
-
-  async exportFullBackup(adminToken: string): Promise<FullBackupPayload | null> {
-    const remote = await fetchJsonSafe('/api/admin/export', {
-      headers: { 'X-Admin-Token': adminToken },
-    });
-    if (remote && remote.ok) return remote.data as unknown as FullBackupPayload;
-    const db = readStaticDb();
-    return {
-      version: '2.0',
-      exportedAt: new Date().toISOString(),
-      labProfile: db.labProfile,
-      prizes: db.prizes,
-      giftLinks: db.giftLinks,
-      prices: db.prices,
-    };
-  },
-
-  async importFullBackup(adminToken: string, parsed: Record<string, unknown>): Promise<{ ok: boolean; message?: string; importedCounts?: { prizes: number; links: number; prices: number } }> {
-    const remote = await fetchJsonSafe('/api/admin/import', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Admin-Token': adminToken },
-      body: JSON.stringify(parsed),
-    });
-    if (remote) return remote.data as { ok: boolean; message?: string; importedCounts?: { prizes: number; links: number; prices: number } };
-    const db = readStaticDb();
-    if (parsed.labProfile) db.labProfile = { ...db.labProfile, ...(parsed.labProfile as Partial<LabProfile>) };
-    if (Array.isArray(parsed.prizes)) db.prizes = parsed.prizes as Prize[];
-    if (Array.isArray(parsed.giftLinks)) db.giftLinks = parsed.giftLinks as GiftLink[];
-    if (Array.isArray(parsed.prices)) db.prices = parsed.prices as LabPriceItem[];
-    writeStaticDb(db);
     return {
       ok: true,
-      importedCounts: {
-        prizes: db.prizes.length,
-        links: db.giftLinks.length,
-        prices: db.prices.length,
+      link: {
+        id: token,
+        token,
+        clientName,
+        clientPhone,
+        visitRef,
+        branchName,
+        status: 'pending',
+        createdAt: new Date(now).toISOString(),
+        expiresAt,
+        openedAt: null,
+        redeemedAt: null,
+        redeemedBy: null,
+        appointmentAt: null,
+        appointmentNote: null,
+        prizeId: null,
+        prizeTitle: null,
+        prizeDescription: null,
+        prizeDiscountLabel: null,
+        prizeCategory: null,
+        prizeCode: null,
+        validHours: null,
       },
     };
+  },
+
+  async updateAppointment(
+    id: string,
+    appointmentAt: string,
+    appointmentNote?: string
+  ): Promise<{ ok: boolean; message?: string }> {
+    const cleanId = normalizeId(id);
+    if (!cleanId) return { ok: false, message: 'معرف الرابط غير صالح.' };
+
+    try {
+      await updateDoc(doc(db, 'giftLinks', cleanId), {
+        appointmentAt: appointmentAt.trim() ? appointmentAt.trim().slice(0, 120) : null,
+        appointmentNote: appointmentNote?.trim() ? appointmentNote.trim().slice(0, 300) : null,
+        updatedAt: serverTimestamp(),
+      });
+      return { ok: true, message: 'تم حفظ وتحديث موعد المريض بنجاح.' };
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `giftLinks/${cleanId}`);
+    }
+  },
+
+  async deleteGiftLink(id: string): Promise<boolean> {
+    const cleanId = normalizeId(id);
+    if (!cleanId) return false;
+    const batch = writeBatch(db);
+    batch.delete(doc(db, 'giftLinks', cleanId, 'private', 'contact'));
+    batch.delete(doc(db, 'giftLinks', cleanId));
+    try {
+      await batch.commit();
+      return true;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, `giftLinks/${cleanId}`);
+    }
+  },
+
+  async redeemPrize(code: string, staffName = 'استقبال المعمل'): Promise<{ ok: boolean; message: string }> {
+    const q = code.trim().toUpperCase();
+    if (!q) return { ok: false, message: 'يرجى إدخال كود الجائزة.' };
+
+    try {
+      const snap = await getDocs(collection(db, 'giftLinks'));
+      const matched = snap.docs.find((d) => {
+        const data = d.data();
+        return (
+          String(data.prizeCode || '').toUpperCase() === q ||
+          String(data.token || '').toUpperCase() === q ||
+          d.id.toUpperCase() === q
+        );
+      });
+
+      if (!matched) {
+        return { ok: false, message: 'كود الجائزة أو الرابط غير موجود.' };
+      }
+
+      const data = matched.data();
+      if (data.status === 'redeemed') {
+        return { ok: false, message: `تم صرف هذه الجائزة مسبقاً للمريض (${data.clientName}).` };
+      }
+
+      await updateDoc(doc(db, 'giftLinks', matched.id), {
+        status: 'redeemed',
+        redeemedAt: new Date().toISOString(),
+        redeemedBy: staffName.slice(0, 120),
+        updatedAt: serverTimestamp(),
+      });
+      return { ok: true, message: `تم تأكيد صرف الجائزة للمريض (${data.clientName}) بنجاح.` };
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, 'giftLinks/redeem');
+    }
+  },
+
+  async upsertPrize(prize: Partial<Prize>): Promise<{ ok: boolean; message?: string }> {
+    const id = prize.id ? normalizeId(prize.id) : `prz_${Date.now().toString(36)}`;
+    if (!id) return { ok: false, message: 'معرف الجائزة غير صالح.' };
+
+    const payload = {
+      id,
+      title: String(prize.title || '').trim().slice(0, 200),
+      description: String(prize.description || '').trim().slice(0, 600),
+      discountLabel: String(prize.discountLabel || 'هدية خاصة').trim().slice(0, 80),
+      category: (prize.category || 'discount') as PrizeCategory,
+      validHours: Math.min(2160, Math.max(1, Number(prize.validHours || 48))),
+      weight: Math.min(1000, Math.max(1, Number(prize.weight || 20))),
+      stock: Math.min(100000, Math.max(1, Number(prize.stock || 50))),
+      usedCount: Math.min(100000, Math.max(0, Number(prize.usedCount || 0))),
+      active: prize.active ?? true,
+      updatedAt: serverTimestamp(),
+    };
+
+    try {
+      const batch = writeBatch(db);
+      batch.set(doc(db, 'prizes', id), payload);
+      await batch.commit();
+      return { ok: true };
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, `prizes/${id}`);
+    }
+  },
+
+  async deletePrize(id: string): Promise<boolean> {
+    const cleanId = normalizeId(id);
+    if (!cleanId) return false;
+    try {
+      await deleteDoc(doc(db, 'prizes', cleanId));
+      return true;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, `prizes/${cleanId}`);
+    }
+  },
+
+  async updateLabProfile(
+    payload: LabProfile
+  ): Promise<{ ok: boolean; labProfile?: LabProfile; message?: string }> {
+    try {
+      const batch = writeBatch(db);
+      batch.set(doc(db, 'publicConfig', 'labProfile'), buildPublicProfilePayload(payload));
+      batch.set(doc(db, 'adminSettings', 'templates'), buildAdminTemplatesPayload(payload));
+      await batch.commit();
+      return { ok: true, labProfile: payload, message: 'تم حفظ بيانات المعمل والشعار في السحابة بنجاح.' };
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'publicConfig/labProfile');
+    }
+  },
+
+  async upsertPriceItem(item: Partial<LabPriceItem>): Promise<{ ok: boolean; message?: string }> {
+    const id = item.id ? normalizeId(item.id) : `t-${Date.now().toString(36)}`;
+    if (!id) return { ok: false, message: 'معرف التحليل غير صالح.' };
+
+    const docData: Record<string, unknown> = {
+      id,
+      code: String(item.code || `RT-${Math.floor(100 + Math.random() * 900)}`).slice(0, 64),
+      nameAr: String(item.nameAr || 'تحليل طبي').trim().slice(0, 200),
+      category: String(item.category || 'general').slice(0, 80),
+      price: Math.max(0, Number(item.price || 0)),
+      active: item.active !== false,
+      updatedAt: serverTimestamp(),
+    };
+    if (item.nameEn) docData.nameEn = String(item.nameEn).slice(0, 200);
+    if (typeof item.offerPrice === 'number') docData.offerPrice = Math.max(0, item.offerPrice);
+    if (item.duration) docData.duration = String(item.duration).slice(0, 120);
+
+    try {
+      const batch = writeBatch(db);
+      batch.set(doc(db, 'prices', id), docData);
+      await batch.commit();
+      return { ok: true };
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, `prices/${id}`);
+    }
+  },
+
+  async bulkSavePrices(
+    changedPrices: LabPriceItem[]
+  ): Promise<{ ok: boolean; message?: string }> {
+    const baseMap = new Map(INITIAL_PRICES.map((p) => [p.id, p]));
+    const modified = changedPrices.filter((item) => {
+      const orig = baseMap.get(item.id);
+      if (!orig) return true;
+      return (
+        orig.price !== item.price ||
+        orig.offerPrice !== item.offerPrice ||
+        orig.nameAr !== item.nameAr ||
+        orig.active !== item.active
+      );
+    });
+
+    if (modified.length === 0) {
+      return { ok: true, message: 'الأسعار محدثة بالفعل.' };
+    }
+
+    try {
+      // Commit in batches of 400 to respect Firestore 500-op limit
+      for (let i = 0; i < modified.length; i += 400) {
+        const chunk = modified.slice(i, i + 400);
+        const batch = writeBatch(db);
+        for (const item of chunk) {
+          const cleanId = normalizeId(item.id) || `t-${Date.now().toString(36)}`;
+          const docData: Record<string, unknown> = {
+            id: cleanId,
+            code: String(item.code || cleanId).slice(0, 64),
+            nameAr: String(item.nameAr || 'تحليل طبي').slice(0, 200),
+            category: String(item.category || 'general').slice(0, 80),
+            price: Math.max(0, Number(item.price || 0)),
+            active: item.active !== false,
+            updatedAt: serverTimestamp(),
+          };
+          if (item.nameEn) docData.nameEn = String(item.nameEn).slice(0, 200);
+          if (typeof item.offerPrice === 'number') docData.offerPrice = Math.max(0, item.offerPrice);
+          if (item.duration) docData.duration = String(item.duration).slice(0, 120);
+          batch.set(doc(db, 'prices', cleanId), docData);
+        }
+        await batch.commit();
+      }
+      return { ok: true };
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'prices/bulk');
+    }
+  },
+
+  async deletePriceItem(id: string): Promise<boolean> {
+    const cleanId = normalizeId(id);
+    if (!cleanId) return false;
+    const isInitial = INITIAL_PRICES.some((p) => p.id === cleanId);
+    try {
+      if (isInitial) {
+        const orig = INITIAL_PRICES.find((p) => p.id === cleanId)!;
+        const batch = writeBatch(db);
+        batch.set(doc(db, 'prices', cleanId), {
+          id: cleanId,
+          code: orig.code,
+          nameAr: orig.nameAr,
+          category: orig.category,
+          price: orig.price,
+          active: false,
+          updatedAt: serverTimestamp(),
+        });
+        await batch.commit();
+      } else {
+        await deleteDoc(doc(db, 'prices', cleanId));
+      }
+      return true;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, `prices/${cleanId}`);
+    }
+  },
+
+  async exportFullBackup(currentData: AdminDashboardData): Promise<FullBackupPayload> {
+    return {
+      version: '3.0',
+      exportedAt: new Date().toISOString(),
+      labProfile: currentData.labProfile,
+      prizes: currentData.prizes,
+      giftLinks: currentData.giftLinks,
+      prices: currentData.prices,
+    };
+  },
+
+  async importFullBackup(parsed: Record<string, unknown>): Promise<{
+    ok: boolean;
+    message?: string;
+    importedCounts?: { prizes: number; links: number; prices: number };
+  }> {
+    let prizesCount = 0;
+    let linksCount = 0;
+    let pricesCount = 0;
+
+    try {
+      const incomingProfile = (parsed.labProfile || parsed.settings) as Partial<LabProfile> | undefined;
+      if (incomingProfile && typeof incomingProfile === 'object') {
+        const mergedProfile: LabProfile = {
+          ...DEFAULT_LAB_PROFILE,
+          ...incomingProfile,
+        };
+        const batch = writeBatch(db);
+        batch.set(doc(db, 'publicConfig', 'labProfile'), buildPublicProfilePayload(mergedProfile));
+        batch.set(doc(db, 'adminSettings', 'templates'), buildAdminTemplatesPayload(mergedProfile));
+        await batch.commit();
+      }
+
+      if (Array.isArray(parsed.prizes) && parsed.prizes.length > 0) {
+        const batch = writeBatch(db);
+        for (const p of parsed.prizes as Prize[]) {
+          const cleanId = normalizeId(String(p.id || `prz_${Date.now().toString(36)}`));
+          if (!cleanId) continue;
+          batch.set(doc(db, 'prizes', cleanId), {
+            id: cleanId,
+            title: String(p.title || '').slice(0, 200),
+            description: String(p.description || '').slice(0, 600),
+            discountLabel: String(p.discountLabel || 'هدية خاصة').slice(0, 80),
+            category: (p.category || 'discount') as PrizeCategory,
+            validHours: Math.min(2160, Math.max(1, Number(p.validHours || 48))),
+            weight: Math.min(1000, Math.max(1, Number(p.weight || 20))),
+            stock: Math.min(100000, Math.max(1, Number(p.stock || 50))),
+            usedCount: Math.min(100000, Math.max(0, Number(p.usedCount || 0))),
+            active: p.active !== false,
+            updatedAt: serverTimestamp(),
+          });
+          prizesCount++;
+        }
+        await batch.commit();
+      }
+
+      if (Array.isArray(parsed.giftLinks) && parsed.giftLinks.length > 0) {
+        const links = parsed.giftLinks as GiftLink[];
+        for (let i = 0; i < links.length; i += 150) {
+          const chunk = links.slice(i, i + 150);
+          const batch = writeBatch(db);
+          for (const lnk of chunk) {
+            const cleanId = normalizeId(String(lnk.token || lnk.id || randomCode('RTBOX-', 6)));
+            if (!cleanId) continue;
+            batch.set(doc(db, 'giftLinks', cleanId), {
+              id: cleanId,
+              token: cleanId,
+              clientName: String(lnk.clientName || 'عميل').slice(0, 120),
+              visitRef: String(lnk.visitRef || '').slice(0, 64),
+              branchName: String(lnk.branchName || '').slice(0, 160),
+              status: lnk.status || 'pending',
+              createdAt: serverTimestamp(),
+              expiresAt: String(lnk.expiresAt || new Date(Date.now() + 14 * 86400_000).toISOString()).slice(0, 64),
+              openedAt: lnk.openedAt || null,
+              redeemedAt: lnk.redeemedAt || null,
+              redeemedBy: lnk.redeemedBy || null,
+              appointmentAt: lnk.appointmentAt || null,
+              appointmentNote: lnk.appointmentNote || null,
+              prizeId: lnk.prizeId || null,
+              prizeTitle: lnk.prizeTitle || null,
+              prizeDescription: lnk.prizeDescription || null,
+              prizeDiscountLabel: lnk.prizeDiscountLabel || null,
+              prizeCategory: lnk.prizeCategory || null,
+              prizeCode: lnk.prizeCode || null,
+              validHours: typeof lnk.validHours === 'number' ? lnk.validHours : null,
+              updatedAt: serverTimestamp(),
+            });
+            batch.set(doc(db, 'giftLinks', cleanId, 'private', 'contact'), {
+              clientPhone: String(lnk.clientPhone || '').slice(0, 40),
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            });
+            linksCount++;
+          }
+          await batch.commit();
+        }
+      }
+
+      const incomingPrices = (parsed.prices || parsed.tests) as Array<Record<string, unknown>> | undefined;
+      if (Array.isArray(incomingPrices) && incomingPrices.length > 0) {
+        const normalizedPrices: LabPriceItem[] = incomingPrices.map((t, idx) => ({
+          id: normalizeId(String(t.id || `imp-${idx}`)) || `imp-${idx}`,
+          code: String(t.code || `RT-${idx + 1}`).slice(0, 64),
+          nameAr: String(t.nameAr || t.name || 'تحليل طبي').slice(0, 200),
+          nameEn: t.nameEn ? String(t.nameEn).slice(0, 200) : undefined,
+          category: String(t.category || 'general').slice(0, 80),
+          price: Math.max(0, Number(t.price) || 0),
+          offerPrice: t.offerPrice !== undefined ? Math.max(0, Number(t.offerPrice)) : undefined,
+          duration: t.duration ? String(t.duration).slice(0, 120) : undefined,
+          active: t.active !== false,
+        }));
+        await this.bulkSavePrices(normalizedPrices);
+        pricesCount = normalizedPrices.length;
+      }
+
+      return {
+        ok: true,
+        message: 'تم استيراد النسخة ومزامنتها سحابياً بنجاح.',
+        importedCounts: {
+          prizes: prizesCount,
+          links: linksCount,
+          prices: pricesCount,
+        },
+      };
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'importFullBackup');
+    }
   },
 };

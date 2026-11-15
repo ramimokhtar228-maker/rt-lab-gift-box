@@ -1,11 +1,13 @@
 import { useState } from 'react';
-import { Eye, EyeOff, Lock, X } from 'lucide-react';
-import { apiClient } from '../services/apiClient';
+import { signInWithPopup, signOut } from 'firebase/auth';
+import { AlertCircle, Check, Copy, ExternalLink, Lock, ShieldCheck, X } from 'lucide-react';
+import { ADMIN_BOOTSTRAP_EMAIL, auth, FIREBASE_PROJECT_ID, googleProvider } from '../firebase';
+import { copyToClipboard } from '../utils/whatsapp';
 
 interface AdminLoginModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onAuthenticated: (token: string) => void;
+  onAuthenticated: () => void;
 }
 
 export function AdminLoginModal({
@@ -13,28 +15,46 @@ export function AdminLoginModal({
   onClose,
   onAuthenticated,
 }: AdminLoginModalProps) {
-  const [password, setPassword] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [unauthorizedDomain, setUnauthorizedDomain] = useState<string | null>(null);
+  const [copiedDomain, setCopiedDomain] = useState(false);
 
   if (!isOpen) return null;
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!password.trim() || loading) return;
+  const handleGoogleSignIn = async () => {
+    if (loading) return;
     setLoading(true);
     setError(null);
+    setUnauthorizedDomain(null);
+
     try {
-      const data = await apiClient.adminLogin(password);
-      if (!data.ok || !data.token) {
-        setError(data.message || 'كلمة المرور غير صحيحة.');
-      } else {
-        setPassword('');
-        onAuthenticated(data.token);
+      const cred = await signInWithPopup(auth, googleProvider);
+      const email = cred.user.email?.toLowerCase();
+      if (!email || !cred.user.emailVerified) {
+        await signOut(auth);
+        setError('يرجى استخدام حساب Google موثّق للوصول إلى لوحة الإدارة.');
+        return;
       }
-    } catch {
-      setError('تعذر الاتصال بالخادم.');
+      if (email !== ADMIN_BOOTSTRAP_EMAIL.toLowerCase()) {
+        await signOut(auth);
+        setError(`هذا الحساب (${cred.user.email}) غير مصرح له بإدارة المعمل. الحساب المصرح: ${ADMIN_BOOTSTRAP_EMAIL}`);
+        return;
+      }
+      onAuthenticated();
+    } catch (err: unknown) {
+      const code = (err as { code?: string })?.code || '';
+      if (code === 'auth/unauthorized-domain') {
+        const host = typeof window !== 'undefined' ? window.location.hostname : '';
+        setUnauthorizedDomain(host);
+        setError(
+          `نطاق الاستضافة (${host}) غير مضاف بعد في قائمة النطاقات المصرح بها (Authorized domains) في Firebase.`
+        );
+      } else if (code === 'auth/popup-closed-by-user') {
+        setError('تم إغلاق نافذة تسجيل الدخول قبل إتمام العملية.');
+      } else {
+        setError('تعذر تسجيل الدخول عبر Google. تأكد من السماح بالنوافذ المنبثقة وحاول مرة أخرى.');
+      }
     } finally {
       setLoading(false);
     }
@@ -47,7 +67,7 @@ export function AdminLoginModal({
       aria-modal="true"
       aria-labelledby="admin-login-title"
     >
-      <div className="w-full max-w-sm rounded-3xl border border-slate-200 bg-white p-6 shadow-xl">
+      <div className="w-full max-w-md rounded-3xl border border-slate-200 bg-white p-6 shadow-xl">
         <div className="mb-5 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-teal-50 text-teal-800">
@@ -55,9 +75,9 @@ export function AdminLoginModal({
             </div>
             <div>
               <h2 id="admin-login-title" className="text-base font-extrabold text-slate-900">
-                دخول الإدارة
+                دخول إدارة المعمل
               </h2>
-              <p className="text-xs text-slate-500">مخصص لمسؤول المعمل فقط</p>
+              <p className="text-xs text-slate-500">مزامنة سحابية لحظية لبيانات المرضى</p>
             </div>
           </div>
           <button
@@ -70,52 +90,80 @@ export function AdminLoginModal({
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label
-              htmlFor="admin-password-input"
-              className="mb-1.5 block text-xs font-bold text-slate-700"
-            >
-              كلمة مرور الإدارة
-            </label>
-            <div className="relative">
-              <input
-                id="admin-password-input"
-                type={showPassword ? 'text' : 'password'}
-                autoComplete="current-password"
-                autoFocus
-                required
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••"
-                dir="ltr"
-                className="w-full rounded-xl border border-slate-300 bg-slate-50 py-2.5 pr-3.5 pl-11 text-left font-mono text-sm text-slate-900 focus:border-teal-700 focus:bg-white focus:outline-none"
-              />
-              <button
-                type="button"
-                onClick={() => setShowPassword((v) => !v)}
-                aria-label={showPassword ? 'إخفاء كلمة المرور' : 'إظهار كلمة المرور'}
-                className="absolute inset-y-0 left-0 flex w-10 items-center justify-center text-slate-400 hover:text-slate-700 cursor-pointer"
-              >
-                {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-              </button>
+        <div className="space-y-4">
+          <div className="rounded-2xl border border-teal-100 bg-teal-50/60 p-4 text-xs leading-relaxed text-teal-950">
+            <div className="mb-1 flex items-center gap-1.5 font-extrabold text-teal-900">
+              <ShieldCheck className="h-4 w-4 text-teal-700" />
+              <span>تسجيل دخول آمن ومرتبط بقاعدة البيانات السحابية</span>
             </div>
+            <p className="text-teal-800">
+              سجّل الدخول بحساب المعمل المعتمد (
+              <span dir="ltr" className="font-mono font-bold">
+                {ADMIN_BOOTSTRAP_EMAIL}
+              </span>
+              ) لعرض كافة المرضى الذين فتحوا صندوق السعادة وتحديد مواعيدهم لحظياً.
+            </p>
           </div>
 
           {error ? (
-            <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-800">
-              {error}
-            </p>
+            <div className="space-y-2 rounded-2xl border border-rose-200 bg-rose-50 p-3.5 text-xs text-rose-900">
+              <div className="flex items-start gap-2 font-semibold">
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-700" />
+                <span>{error}</span>
+              </div>
+              {unauthorizedDomain ? (
+                <div className="space-y-2 border-t border-rose-200 pt-2 text-[11px] leading-relaxed text-rose-800">
+                  <p className="font-bold">للتفعيل على هذا الرابط ({unauthorizedDomain}) خلال 10 ثوانٍ:</p>
+                  <ol className="list-inside list-decimal space-y-1">
+                    <li>افتح إعدادات Authentication في Firebase Console.</li>
+                    <li>أضف النطاق التالي في Authorized domains:</li>
+                  </ol>
+                  <div className="flex items-center justify-between gap-2 rounded-lg bg-white px-2.5 py-1.5 font-mono text-slate-900">
+                    <span dir="ltr">{unauthorizedDomain}</span>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const ok = await copyToClipboard(unauthorizedDomain);
+                        if (ok) {
+                          setCopiedDomain(true);
+                          window.setTimeout(() => setCopiedDomain(false), 1800);
+                        }
+                      }}
+                      className="inline-flex items-center gap-1 text-teal-700 font-sans font-bold cursor-pointer"
+                    >
+                      {copiedDomain ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                      <span>{copiedDomain ? 'نُسخ' : 'نسخ'}</span>
+                    </button>
+                  </div>
+                  <a
+                    href={`https://console.firebase.google.com/project/${FIREBASE_PROJECT_ID}/authentication/settings`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 font-bold text-teal-800 underline"
+                  >
+                    <span>فتح إعدادات Firebase Console</span>
+                    <ExternalLink className="h-3 w-3" />
+                  </a>
+                </div>
+              ) : null}
+            </div>
           ) : null}
 
           <button
-            type="submit"
+            type="button"
             disabled={loading}
-            className="flex min-h-[46px] w-full items-center justify-center rounded-xl bg-teal-700 px-5 py-2.5 text-sm font-extrabold text-white transition-colors hover:bg-teal-800 disabled:opacity-60 cursor-pointer"
+            onClick={handleGoogleSignIn}
+            className="flex min-h-[48px] w-full items-center justify-center gap-2.5 rounded-2xl bg-teal-700 px-5 py-3 text-sm font-extrabold text-white shadow-sm transition-colors hover:bg-teal-800 disabled:opacity-60 cursor-pointer"
           >
-            {loading ? 'جاري التحقق...' : 'دخول لوحة الإدارة'}
+            <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                fill="currentColor"
+                d="M21.35 11.1h-9.17v2.73h6.51c-.33 3.81-3.5 5.44-6.5 5.44C8.36 19.27 5 16.25 5 12c0-4.1 3.2-7.27 7.2-7.27 3.09 0 4.9 1.97 4.9 1.97L19 4.72S16.56 2 12.1 2C6.42 2 2.03 6.8 2.03 12c0 5.05 4.13 10 10.22 10 5.35 0 9.25-3.67 9.25-9.09 0-1.15-.15-1.81-.15-1.81Z"
+              />
+            </svg>
+            <span>{loading ? 'جاري تسجيل الدخول...' : 'تسجيل الدخول بحساب Google للإدارة'}</span>
           </button>
-        </form>
+        </div>
       </div>
     </div>
   );

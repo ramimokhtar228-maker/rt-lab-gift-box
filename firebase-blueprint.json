@@ -1,0 +1,173 @@
+{
+  "entities": {
+    "PublicLabProfile": {
+      "title": "PublicLabProfile",
+      "description": "Public laboratory branding, contact info, branches, and patient WhatsApp claim template.",
+      "type": "object",
+      "properties": {
+        "labName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "tagline": { "type": "string", "maxLength": 200 },
+        "director": { "type": "string", "maxLength": 160 },
+        "hotlineNumber": { "type": "string", "maxLength": 40 },
+        "whatsappNumber": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "address": { "type": "string", "maxLength": 300 },
+        "workingHours": { "type": "string", "maxLength": 200 },
+        "branches": { "type": "array" },
+        "logoUrl": { "type": "string", "maxLength": 500000 },
+        "whatsappPatientClaimTemplate": { "type": "string", "maxLength": 2000 },
+        "shareBaseUrl": { "type": "string", "maxLength": 300 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "labName",
+        "tagline",
+        "director",
+        "hotlineNumber",
+        "whatsappNumber",
+        "address",
+        "workingHours",
+        "branches",
+        "logoUrl",
+        "whatsappPatientClaimTemplate",
+        "shareBaseUrl",
+        "updatedAt"
+      ]
+    },
+    "AdminTemplates": {
+      "title": "AdminTemplates",
+      "description": "Admin-only WhatsApp invite and winner reply message templates.",
+      "type": "object",
+      "properties": {
+        "whatsappInviteTemplate": { "type": "string", "maxLength": 2000 },
+        "whatsappWinnerReplyTemplate": { "type": "string", "maxLength": 2000 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["whatsappInviteTemplate", "whatsappWinnerReplyTemplate", "updatedAt"]
+    },
+    "Prize": {
+      "title": "Prize",
+      "description": "Prize offer available inside the Happiness Box.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 600 },
+        "discountLabel": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "category": { "type": "string", "enum": ["discount", "free_test", "package", "home_visit", "gift"] },
+        "validHours": { "type": "number" },
+        "weight": { "type": "number" },
+        "stock": { "type": "number" },
+        "usedCount": { "type": "number" },
+        "active": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "title",
+        "description",
+        "discountLabel",
+        "category",
+        "validHours",
+        "weight",
+        "stock",
+        "usedCount",
+        "active",
+        "updatedAt"
+      ]
+    },
+    "GiftLink": {
+      "title": "GiftLink",
+      "description": "Patient Happiness Box session and prize record (PII phone number is isolated in private subcollection).",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "token": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "clientName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "visitRef": { "type": "string", "maxLength": 64 },
+        "branchName": { "type": "string", "maxLength": 160 },
+        "status": { "type": "string", "enum": ["pending", "opened", "redeemed", "expired"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "expiresAt": { "type": "string", "minLength": 10, "maxLength": 64 },
+        "openedAt": { "type": "string", "maxLength": 64 },
+        "redeemedAt": { "type": "string", "maxLength": 64 },
+        "redeemedBy": { "type": "string", "maxLength": 120 },
+        "appointmentAt": { "type": "string", "maxLength": 120 },
+        "appointmentNote": { "type": "string", "maxLength": 300 },
+        "prizeId": { "type": "string", "maxLength": 128 },
+        "prizeTitle": { "type": "string", "maxLength": 200 },
+        "prizeDescription": { "type": "string", "maxLength": 600 },
+        "prizeDiscountLabel": { "type": "string", "maxLength": 80 },
+        "prizeCategory": { "type": "string", "maxLength": 40 },
+        "prizeCode": { "type": "string", "maxLength": 64 },
+        "validHours": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "token",
+        "clientName",
+        "visitRef",
+        "branchName",
+        "status",
+        "createdAt",
+        "expiresAt",
+        "updatedAt"
+      ]
+    },
+    "GiftLinkContact": {
+      "title": "GiftLinkContact",
+      "description": "Isolated PII contact phone record for a GiftLink.",
+      "type": "object",
+      "properties": {
+        "clientPhone": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["clientPhone", "createdAt", "updatedAt"]
+    },
+    "LabPriceItem": {
+      "title": "LabPriceItem",
+      "description": "Laboratory test price override or custom test item.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "code": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "nameAr": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "nameEn": { "type": "string", "maxLength": 200 },
+        "category": { "type": "string", "maxLength": 80 },
+        "price": { "type": "number" },
+        "offerPrice": { "type": "number" },
+        "duration": { "type": "string", "maxLength": 120 },
+        "active": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "code", "nameAr", "category", "price", "active", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/publicConfig/labProfile": {
+      "schema": { "$ref": "#/entities/PublicLabProfile" },
+      "description": "Single public lab configuration document."
+    },
+    "/adminSettings/templates": {
+      "schema": { "$ref": "#/entities/AdminTemplates" },
+      "description": "Admin-only WhatsApp invite and winner reply templates."
+    },
+    "/prizes/{prizeId}": {
+      "schema": { "$ref": "#/entities/Prize" },
+      "description": "Catalog of Happiness Box prizes."
+    },
+    "/giftLinks/{linkId}": {
+      "schema": { "$ref": "#/entities/GiftLink" },
+      "description": "Public/patient box sessions keyed by random token."
+    },
+    "/giftLinks/{linkId}/private/contact": {
+      "schema": { "$ref": "#/entities/GiftLinkContact" },
+      "description": "Isolated PII phone numbers readable only by admin."
+    },
+    "/prices/{priceId}": {
+      "schema": { "$ref": "#/entities/LabPriceItem" },
+      "description": "Admin-managed lab price overrides and custom tests."
+    }
+  }
+}

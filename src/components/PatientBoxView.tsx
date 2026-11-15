@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import confetti from 'canvas-confetti';
 import {
+  AlertCircle,
+  CalendarClock,
   Check,
   Clock,
   Copy,
@@ -10,27 +12,33 @@ import {
   Phone,
   ShieldCheck,
   Sparkles,
-  AlertCircle,
   Volume2,
   VolumeX,
 } from 'lucide-react';
 import type { BoxPublicResponse, LabProfile } from '../types';
+import { apiClient } from '../services/apiClient';
 import {
   buildPatientClaimWhatsAppUrl,
   copyToClipboard,
   formatArabicDate,
   getTimeRemaining,
 } from '../utils/whatsapp';
-import { apiClient, DEFAULT_ASSET_ICON, DEFAULT_ASSET_LOGO } from '../services/apiClient';
 import { playBoxOpenChime } from '../utils/sound';
-import SEALED_BOX_IMG from '../assets/images/sealed_happiness_box_1794768643734.jpg';
-import OPENED_BOX_IMG from '../assets/images/opened_happiness_box_1794768644943.jpg';
+import sealedBoxImg from '../assets/images/sealed_happiness_box_1794768643734.jpg';
+import openedBoxImg from '../assets/images/opened_happiness_box_1794768644943.jpg';
+
+const BASE_PATH = import.meta.env.BASE_URL || '/';
+const DEFAULT_ASSET_LOGO = `${BASE_PATH}logo.jpg`;
+const DEFAULT_ASSET_ICON = `${BASE_PATH}icon.svg`;
+
+const SEALED_BOX_IMG = sealedBoxImg;
+const OPENED_BOX_IMG = openedBoxImg;
 
 interface PatientBoxViewProps {
   token: string | null;
   encodedData?: string | null;
   labProfile: LabProfile;
-  onBoxAssigned: (token: string) => void;
+  onBoxAssigned: (newToken: string) => void;
 }
 
 export function PatientBoxView({
@@ -41,31 +49,49 @@ export function PatientBoxView({
 }: PatientBoxViewProps) {
   const [box, setBox] = useState<BoxPublicResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(Boolean(token));
+  const [opening, setOpening] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [opening, setOpening] = useState(false);
   const [copiedCode, setCopiedCode] = useState(false);
+  const [muted, setMuted] = useState(false);
+  const [sealedImgError, setSealedImgError] = useState(false);
+  const [openedImgError, setOpenedImgError] = useState(false);
+  const [, setTick] = useState(0);
+
+  // Self-claim state when opened from universal link without ?box=
   const [showSelfForm, setShowSelfForm] = useState(false);
   const [selfName, setSelfName] = useState('');
   const [selfPhone, setSelfPhone] = useState('');
   const [selfBranch, setSelfBranch] = useState(labProfile.branches[0] || '');
-  const [sealedImgError, setSealedImgError] = useState(false);
-  const [openedImgError, setOpenedImgError] = useState(false);
-  const [muted, setMuted] = useState(false);
-  const [, setTick] = useState(0);
 
   useEffect(() => {
-    if (!selfBranch && labProfile.branches.length > 0) {
+    if (!selfBranch && labProfile.branches[0]) {
       setSelfBranch(labProfile.branches[0]);
     }
   }, [labProfile.branches, selfBranch]);
 
-  const loadBox = useCallback(async (targetToken: string) => {
-    setLoading(true);
-    setErrorMsg(null);
-    const cacheKey = `rt_hb_won_${targetToken.toUpperCase()}`;
-    try {
-      const data = await apiClient.getBoxByToken(targetToken, encodedData);
-      if (!data.ok || !data.box) {
+  const loadBox = useCallback(
+    async (targetToken: string) => {
+      setLoading(true);
+      setErrorMsg(null);
+      const cacheKey = `rt_hb_won_${targetToken.toUpperCase()}`;
+      try {
+        const data = await apiClient.getBoxByToken(targetToken, encodedData);
+        if (!data.ok || !data.box) {
+          try {
+            const cached = window.localStorage.getItem(cacheKey);
+            if (cached) {
+              setBox(JSON.parse(cached));
+              return;
+            }
+          } catch {
+            // ignore
+          }
+          setBox(null);
+          setErrorMsg(data.message || 'لم يتم العثور على رابط صندوق السعادة.');
+        } else {
+          setBox(data.box);
+        }
+      } catch {
         try {
           const cached = window.localStorage.getItem(cacheKey);
           if (cached) {
@@ -75,40 +101,13 @@ export function PatientBoxView({
         } catch {
           // ignore
         }
-        setBox(null);
-        setErrorMsg(data.message || 'لم يتم العثور على رابط صندوق السعادة.');
-      } else {
-        let resolvedBox: BoxPublicResponse = data.box;
-        if (resolvedBox.status === 'pending') {
-          try {
-            const cached = window.localStorage.getItem(cacheKey);
-            if (cached) {
-              const parsed = JSON.parse(cached) as BoxPublicResponse;
-              if (parsed.status === 'opened' || parsed.status === 'redeemed') {
-                resolvedBox = parsed;
-              }
-            }
-          } catch {
-            // ignore
-          }
-        }
-        setBox(resolvedBox);
+        setErrorMsg('تعذر الاتصال بقاعدة البيانات، يرجى المحاولة مرة أخرى.');
+      } finally {
+        setLoading(false);
       }
-    } catch {
-      try {
-        const cached = window.localStorage.getItem(cacheKey);
-        if (cached) {
-          setBox(JSON.parse(cached));
-          return;
-        }
-      } catch {
-        // ignore
-      }
-      setErrorMsg('تعذر الاتصال بالخادم، يرجى المحاولة مرة أخرى.');
-    } finally {
-      setLoading(false);
-    }
-  }, [encodedData]);
+    },
+    [encodedData]
+  );
 
   useEffect(() => {
     if (token) {
@@ -120,7 +119,6 @@ export function PatientBoxView({
     }
   }, [token, loadBox]);
 
-  // Live 1-second countdown ticker when a prize is revealed
   useEffect(() => {
     if (!box || (box.status !== 'opened' && box.status !== 'redeemed')) return;
     const timer = window.setInterval(() => {
@@ -157,7 +155,10 @@ export function PatientBoxView({
       } else {
         setBox(data.box);
         try {
-          window.localStorage.setItem(`rt_hb_won_${data.box.token.toUpperCase()}`, JSON.stringify(data.box));
+          window.localStorage.setItem(
+            `rt_hb_won_${data.box.token.toUpperCase()}`,
+            JSON.stringify(data.box)
+          );
         } catch {
           // ignore
         }
@@ -190,7 +191,10 @@ export function PatientBoxView({
       } else {
         setBox(data.box);
         try {
-          window.localStorage.setItem(`rt_hb_won_${data.box.token.toUpperCase()}`, JSON.stringify(data.box));
+          window.localStorage.setItem(
+            `rt_hb_won_${data.box.token.toUpperCase()}`,
+            JSON.stringify(data.box)
+          );
         } catch {
           // ignore
         }
@@ -199,7 +203,7 @@ export function PatientBoxView({
         fireCelebration();
       }
     } catch {
-      setErrorMsg('تعذر الاتصال بالخادم، يرجى المحاولة مرة أخرى.');
+      setErrorMsg('تعذر الاتصال بقاعدة البيانات، يرجى المحاولة مرة أخرى.');
     } finally {
       setOpening(false);
     }
@@ -214,7 +218,9 @@ export function PatientBoxView({
   };
 
   const remaining = box ? getTimeRemaining(box.expiresAt) : null;
-  const isExpired = Boolean(box && (box.status === 'expired' || (box.status === 'opened' && remaining?.expired)));
+  const isExpired = Boolean(
+    box && (box.status === 'expired' || (box.status === 'opened' && remaining?.expired))
+  );
 
   return (
     <div className="mx-auto w-full max-w-5xl px-4 py-8 sm:px-6 sm:py-12">
@@ -280,7 +286,21 @@ export function PatientBoxView({
                 </div>
               </div>
 
-              {/* Countdown Timer ("الجائزة ليها وقت محدد") */}
+              {/* Scheduled Appointment Banner (if Admin assigned a time) */}
+              {box.appointmentAt ? (
+                <div className="flex items-start gap-3 rounded-2xl border border-teal-200 bg-teal-50/80 p-4 text-teal-950">
+                  <CalendarClock className="mt-0.5 h-5 w-5 shrink-0 text-teal-700" />
+                  <div className="text-sm">
+                    <p className="font-extrabold">تم تحديد موعدك بالمعمل</p>
+                    <p className="mt-0.5 text-xs font-bold text-teal-800">{box.appointmentAt}</p>
+                    {box.appointmentNote ? (
+                      <p className="mt-1 text-xs text-teal-700">{box.appointmentNote}</p>
+                    ) : null}
+                  </div>
+                </div>
+              ) : null}
+
+              {/* Countdown Timer */}
               {box.status === 'redeemed' ? (
                 <div className="flex items-center gap-3 rounded-2xl border border-emerald-200 bg-emerald-50/70 p-4 text-emerald-900">
                   <ShieldCheck className="h-5 w-5 shrink-0 text-emerald-700" />
@@ -413,21 +433,21 @@ export function PatientBoxView({
               >
                 {muted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
               </button>
-              <div className="mb-4 space-y-1">
-                <p className="text-xs font-bold text-teal-700">
-                  {box ? `أهلاً ${box.clientName}` : labProfile.labName}
-                </p>
-                <h1 className="text-2xl font-extrabold text-slate-900 sm:text-3xl">
-                  صندوق السعادة بانتظارك
-                </h1>
-                <p className="mx-auto max-w-md text-sm text-slate-600">
-                  اضغط على الصندوق لفتحه والكشف عن جائزتك الفورية والمحددة بوقت من {labProfile.labName}.
-                </p>
-              </div>
 
-              {/* Interactive Gift Box Visual */}
+              <p className="mb-2 text-xs font-bold tracking-wide text-amber-700">
+                {box ? `هدية خاصة باسم: ${box.clientName}` : 'برنامج صندوق السعادة من معامل RT'}
+              </p>
+
+              <h1 className="mb-2 text-2xl font-extrabold text-slate-900 sm:text-3xl">
+                صندوق السعادة بانتظارك
+              </h1>
+              <p className="mb-6 max-w-md text-sm leading-relaxed text-slate-600">
+                افتح الصندوق الآن لتكشف عن هديتك المضمونة — خصم خاص أو تحليل مجاني متاح لوقت محدد.
+              </p>
+
               <button
                 type="button"
+                disabled={opening}
                 onClick={() => {
                   if (box) {
                     void handleOpenAssignedBox();
@@ -435,9 +455,8 @@ export function PatientBoxView({
                     setShowSelfForm(true);
                   }
                 }}
-                disabled={opening}
                 aria-label="افتح صندوق السعادة"
-                className={`group relative my-4 h-60 w-60 overflow-hidden rounded-3xl border border-slate-200 bg-slate-50 shadow-sm transition-transform hover:scale-[1.02] active:scale-[0.98] cursor-pointer sm:h-64 sm:w-64 ${
+                className={`group relative mb-6 h-56 w-56 overflow-hidden rounded-3xl border border-slate-200 bg-slate-50 shadow-sm transition-transform hover:scale-[1.02] active:scale-[0.98] cursor-pointer sm:h-64 sm:w-64 ${
                   opening ? 'animate-box-shake' : 'animate-gentle-float'
                 }`}
               >
@@ -537,7 +556,11 @@ export function PatientBoxView({
           <div className="space-y-6">
             <div className="flex items-center gap-3.5 border-b border-slate-100 pb-5">
               <img
-                src={labProfile.logoUrl === '/logo.jpg' ? DEFAULT_ASSET_LOGO : labProfile.logoUrl || DEFAULT_ASSET_LOGO}
+                src={
+                  labProfile.logoUrl === '/logo.jpg'
+                    ? DEFAULT_ASSET_LOGO
+                    : labProfile.logoUrl || DEFAULT_ASSET_LOGO
+                }
                 alt={labProfile.labName}
                 referrerPolicy="no-referrer"
                 onError={(e) => {
@@ -570,7 +593,7 @@ export function PatientBoxView({
                   <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-teal-50 font-mono text-xs font-bold text-teal-800">
                     2
                   </span>
-                  <span>أرسل رسالة الجائزة لواتساب المعمل بضغطة واحدة لتأكيدها.</span>
+                  <span>أرسل رسالة الجائزة لواتساب المعمل بضغطة واحدة لتأكيدها وحجز الموعد.</span>
                 </li>
                 <li className="flex items-start gap-3">
                   <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-teal-50 font-mono text-xs font-bold text-teal-800">

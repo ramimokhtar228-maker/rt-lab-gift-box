@@ -17,22 +17,18 @@ import { AdminPrizesTab } from './AdminPrizesTab';
 import { AdminPricesBackupTab } from './AdminPricesBackupTab';
 import { AdminSettingsTab } from './AdminSettingsTab';
 
+type AdminTab = 'links' | 'prizes' | 'settings' | 'prices';
+
 interface AdminPanelViewProps {
-  adminToken: string;
   shareBaseUrl: string;
   onLogout: () => void;
-  onSessionExpired: () => void;
   onProfileUpdated: (profile: LabProfile) => void;
   onPreviewBox: (token?: string) => void;
 }
 
-type AdminTab = 'links' | 'prizes' | 'prices' | 'settings';
-
 export function AdminPanelView({
-  adminToken,
   shareBaseUrl,
   onLogout,
-  onSessionExpired,
   onProfileUpdated,
   onPreviewBox,
 }: AdminPanelViewProps) {
@@ -42,8 +38,8 @@ export function AdminPanelView({
   const [copiedAdminLink, setCopiedAdminLink] = useState(false);
   const [toast, setToast] = useState<{ text: string; isError: boolean } | null>(null);
 
-  const callbacksRef = useRef({ onSessionExpired, onProfileUpdated });
-  callbacksRef.current = { onSessionExpired, onProfileUpdated };
+  const callbacksRef = useRef({ onProfileUpdated });
+  callbacksRef.current = { onProfileUpdated };
 
   const showToast = useCallback((text: string, isError = false) => {
     setToast({ text, isError });
@@ -52,47 +48,59 @@ export function AdminPanelView({
     }, 3600);
   }, []);
 
-  const fetchDashboard = useCallback(async () => {
-    try {
-      const json = await apiClient.getAdminDashboard(adminToken);
-      if (json.status === 401) {
-        callbacksRef.current.onSessionExpired();
-        return;
-      }
-      if (json.ok && json.labProfile && json.prizes && json.giftLinks && json.prices && json.stats) {
-        setData({
-          labProfile: json.labProfile,
-          prizes: json.prizes,
-          giftLinks: json.giftLinks,
-          prices: json.prices,
-          stats: json.stats,
-        });
-        callbacksRef.current.onProfileUpdated(json.labProfile);
-      }
-    } catch {
-      showToast('تعذر تحميل بيانات لوحة الإدارة.', true);
-    } finally {
-      setLoading(false);
-    }
-  }, [adminToken, showToast]);
-
   useEffect(() => {
-    void fetchDashboard();
-  }, [fetchDashboard]);
+    let unsub: (() => void) | undefined;
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        await apiClient.ensureInitialSeed();
+      } catch (err) {
+        if (!cancelled) {
+          console.error('Seed check error:', err);
+          showToast('تعذر تهيئة قاعدة البيانات السحابية. تأكد من تسجيل الدخول بالحساب المصرح.', true);
+        }
+      }
+
+      if (cancelled) return;
+
+      unsub = apiClient.subscribeAdminDashboard(
+        (snapshotData) => {
+          setData(snapshotData);
+          callbacksRef.current.onProfileUpdated(snapshotData.labProfile);
+          setLoading(false);
+        },
+        (err) => {
+          console.error('Dashboard subscription error:', err);
+          showToast('تعذر قراءة بيانات المرضى من السحابة — تأكد من صلاحية الحساب.', true);
+          setLoading(false);
+        }
+      );
+    })();
+
+    return () => {
+      cancelled = true;
+      if (unsub) unsub();
+    };
+  }, [showToast]);
+
+  const noopRefresh = useCallback(async () => {
+    // onSnapshot keeps dashboard data synchronized in real time automatically
+  }, []);
 
   if (loading || !data) {
     return (
       <div className="mx-auto flex min-h-[420px] max-w-7xl items-center justify-center px-4">
         <div className="flex flex-col items-center gap-3 text-slate-500">
           <div className="h-9 w-9 animate-spin rounded-full border-3 border-slate-200 border-t-teal-700" />
-          <span className="text-sm font-semibold">جاري تحميل لوحة الإدارة...</span>
+          <span className="text-sm font-semibold">جاري مزامنة بيانات المرضى ولوحة الإدارة...</span>
         </div>
       </div>
     );
   }
 
   const tabs: { id: AdminTab; label: string; icon: typeof Link2 }[] = [
-    { id: 'links', label: 'الروابط والردود', icon: Link2 },
+    { id: 'links', label: 'المرضى والروابط والمواعيد', icon: Link2 },
     { id: 'prizes', label: 'جوائز البوكس', icon: Gift },
     { id: 'settings', label: 'بيانات المعمل واللوجو', icon: Settings },
     { id: 'prices', label: 'النسخ الاحتياطي والأسعار', icon: DatabaseBackup },
@@ -107,7 +115,7 @@ export function AdminPanelView({
             إدارة برنامج Happiness Box · {data.labProfile.labName}
           </h1>
           <p className="text-xs text-slate-500">
-            أنشئ روابط المرضى، عدّل الجوائز ومدتها، ثبّت الأسعار، وصدّر أو استورد نسخة كاملة بسهولة.
+            مزامنة سحابية مباشرة: كل مريض يفتح الصندوق يظهر هنا فوراً لتأكيد فوزه وتحديد الموعد أو التصدير إلى Excel.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2 shrink-0">
@@ -141,15 +149,15 @@ export function AdminPanelView({
             className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2 text-xs font-bold text-rose-800 hover:bg-rose-100 cursor-pointer whitespace-nowrap"
           >
             <LogOut className="h-3.5 w-3.5" />
-            <span>قفل الإدارة</span>
+            <span>تسجيل الخروج</span>
           </button>
         </div>
       </div>
 
-      {/* KPI Row (4 clean metrics, tabular-nums) */}
+      {/* KPI Row */}
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         {[
-          { label: 'إجمالي الروابط', value: data.stats.totalLinks, accent: 'text-slate-900' },
+          { label: 'إجمالي السجلات والروابط', value: data.stats.totalLinks, accent: 'text-slate-900' },
           { label: 'كسب (بانتظار الصرف)', value: data.stats.openedLinks, accent: 'text-amber-700' },
           { label: 'تم صرفها بالمعمل', value: data.stats.redeemedLinks, accent: 'text-emerald-700' },
           { label: 'جوائز نشطة بالبوكس', value: data.stats.activePrizes, accent: 'text-teal-800' },
@@ -209,9 +217,8 @@ export function AdminPanelView({
           links={data.giftLinks}
           prizes={data.prizes}
           labProfile={data.labProfile}
-          adminToken={adminToken}
           shareBaseUrl={shareBaseUrl}
-          onRefresh={fetchDashboard}
+          onRefresh={noopRefresh}
           onPreviewBox={(t) => onPreviewBox(t)}
           onNotify={showToast}
         />
@@ -220,17 +227,15 @@ export function AdminPanelView({
       {tab === 'prizes' ? (
         <AdminPrizesTab
           prizes={data.prizes}
-          adminToken={adminToken}
-          onRefresh={fetchDashboard}
+          onRefresh={noopRefresh}
           onNotify={showToast}
         />
       ) : null}
 
       {tab === 'prices' ? (
         <AdminPricesBackupTab
-          prices={data.prices}
-          adminToken={adminToken}
-          onRefresh={fetchDashboard}
+          dashboardData={data}
+          onRefresh={noopRefresh}
           onNotify={showToast}
         />
       ) : null}
@@ -238,7 +243,6 @@ export function AdminPanelView({
       {tab === 'settings' ? (
         <AdminSettingsTab
           labProfile={data.labProfile}
-          adminToken={adminToken}
           onProfileSaved={(updated) => {
             setData((prev) => (prev ? { ...prev, labProfile: updated } : prev));
             onProfileUpdated(updated);

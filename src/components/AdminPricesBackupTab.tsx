@@ -8,22 +8,21 @@ import {
   Trash2,
   Upload,
 } from 'lucide-react';
-import type { LabPriceItem } from '../types';
+import type { AdminDashboardData, LabPriceItem } from '../types';
 import { apiClient } from '../services/apiClient';
 
 interface AdminPricesBackupTabProps {
-  prices: LabPriceItem[];
-  adminToken: string;
+  dashboardData: AdminDashboardData;
   onRefresh: () => Promise<void>;
   onNotify: (msg: string, isError?: boolean) => void;
 }
 
 export function AdminPricesBackupTab({
-  prices,
-  adminToken,
+  dashboardData,
   onRefresh,
   onNotify,
 }: AdminPricesBackupTabProps) {
+  const { prices } = dashboardData;
   const [localPrices, setLocalPrices] = useState<LabPriceItem[]>(prices);
   const [dirty, setDirty] = useState(false);
   const [savingAll, setSavingAll] = useState(false);
@@ -37,7 +36,6 @@ export function AdminPricesBackupTab({
   const [newOfferPrice, setNewOfferPrice] = useState('');
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Sync local list when fresh prices arrive from server and not dirty
   const activePrices = dirty ? localPrices : prices;
 
   const filteredPrices = useMemo(() => {
@@ -71,16 +69,16 @@ export function AdminPricesBackupTab({
   const handleSaveAllPrices = async () => {
     setSavingAll(true);
     try {
-      const data = await apiClient.bulkSavePrices(adminToken, activePrices);
+      const data = await apiClient.bulkSavePrices(activePrices);
       if (!data.ok) {
         onNotify(data.message || 'تعذر حفظ الأسعار.', true);
       } else {
         setDirty(false);
         await onRefresh();
-        onNotify('تم تثبيت وحفظ كافة الأسعار المعدلة في قاعدة البيانات.');
+        onNotify('تم تثبيت وحفظ كافة الأسعار المعدلة في قاعدة البيانات السحابية.');
       }
     } catch {
-      onNotify('تعذر الاتصال بالخادم.', true);
+      onNotify('تعذر الاتصال بقاعدة البيانات.', true);
     } finally {
       setSavingAll(false);
     }
@@ -90,7 +88,7 @@ export function AdminPricesBackupTab({
     e.preventDefault();
     if (!newNameAr.trim() || !newPrice) return;
     try {
-      const data = await apiClient.upsertPriceItem(adminToken, {
+      const data = await apiClient.upsertPriceItem({
         nameAr: newNameAr.trim(),
         code: newCode.trim() || undefined,
         price: Number(newPrice),
@@ -109,13 +107,13 @@ export function AdminPricesBackupTab({
         onNotify(data.message || 'تعذر الإضافة.', true);
       }
     } catch {
-      onNotify('تعذر الاتصال بالخادم.', true);
+      onNotify('تعذر الاتصال بقاعدة البيانات.', true);
     }
   };
 
   const handleDeletePrice = async (id: string) => {
     try {
-      const ok = await apiClient.deletePriceItem(adminToken, id);
+      const ok = await apiClient.deletePriceItem(id);
       if (ok) {
         setDirty(false);
         await onRefresh();
@@ -129,12 +127,10 @@ export function AdminPricesBackupTab({
   const handleExportFullBackup = async () => {
     setExporting(true);
     try {
-      const data = await apiClient.exportFullBackup(adminToken);
-      if (!data) {
-        onNotify('تعذر تصدير النسخة الاحتياطية.', true);
-        return;
-      }
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' });
+      const data = await apiClient.exportFullBackup(dashboardData);
+      const blob = new Blob([JSON.stringify(data, null, 2)], {
+        type: 'application/json;charset=utf-8',
+      });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -151,43 +147,20 @@ export function AdminPricesBackupTab({
     }
   };
 
-  const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setImporting(true);
-    try {
-      const text = await file.text();
-      const parsed = JSON.parse(text);
-      const data = await apiClient.importFullBackup(adminToken, parsed);
-      if (!data.ok || !data.importedCounts) {
-        onNotify(data.message || 'ملف النسخة الاحتياطية غير متوافق.', true);
-      } else {
-        setDirty(false);
-        await onRefresh();
-        onNotify(
-          `تم استيراد وتثبيت النسخة (${data.importedCounts.prices} سعر، ${data.importedCounts.prizes} جائزة، ${data.importedCounts.links} رابط).`
-        );
-      }
-    } catch {
-      onNotify('تعذر قراءة ملف JSON، تأكد من صحة الملف.', true);
-    } finally {
-      setImporting(false);
-      if (fileInputRef.current) fileInputRef.current.value = '';
-    }
-  };
-
   const handleExportPricesCsv = () => {
-    const headers = ['Code', 'NameAr', 'NameEn', 'Category', 'Price', 'OfferPrice'];
-    const rows = activePrices.map((p) => [
-      p.code,
-      `"${(p.nameAr || '').replaceAll('"', '""')}"`,
-      `"${(p.nameEn || '').replaceAll('"', '""')}"`,
-      p.category,
-      String(p.price),
-      p.offerPrice !== undefined ? String(p.offerPrice) : '',
-    ]);
-    const csv = '\uFEFF' + [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const header = 'الكود,اسم التحليل,English Name,القسم,السعر,سعر العرض';
+    const rows = activePrices.map((p) =>
+      [
+        `"${(p.code || '').replace(/"/g, '""')}"`,
+        `"${(p.nameAr || '').replace(/"/g, '""')}"`,
+        `"${(p.nameEn || '').replace(/"/g, '""')}"`,
+        `"${(p.category || '').replace(/"/g, '""')}"`,
+        p.price,
+        p.offerPrice ?? '',
+      ].join(',')
+    );
+    const csv = `\uFEFF${[header, ...rows].join('\n')}`;
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -196,42 +169,58 @@ export function AdminPricesBackupTab({
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-    onNotify('تم تصدير جدول الأسعار بصيغة CSV.');
+    onNotify('تم تصدير قائمة الأسعار إلى ملف Excel (CSV).');
+  };
+
+  const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImporting(true);
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text) as Record<string, unknown>;
+      const data = await apiClient.importFullBackup(parsed);
+      if (!data.ok) {
+        onNotify(data.message || 'فشل استيراد الملف.', true);
+      } else {
+        setDirty(false);
+        await onRefresh();
+        onNotify(
+          `تم الاستيراد والمزامنة السحابية (${data.importedCounts?.prizes ?? 0} جائزة، ${data.importedCounts?.links ?? 0} رابط، ${data.importedCounts?.prices ?? 0} تحليل).`
+        );
+      }
+    } catch {
+      onNotify('ملف JSON غير صالح أو تعذر قراءته.', true);
+    } finally {
+      setImporting(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
   };
 
   return (
     <div className="space-y-6">
-      {/* Backup Export / Import Card */}
+      {/* Export / Import Full Backup */}
       <section className="rounded-2xl border border-slate-200 bg-white p-5 sm:p-6">
-        <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-center">
+        <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
           <div>
             <h2 className="text-base font-extrabold text-slate-900">
-              النسخ الاحتياطي وتثبيت البيانات (استيراد وتصدير)
+              النسخ الاحتياطي وتصدير/استيراد البيانات الكاملة
             </h2>
             <p className="text-xs text-slate-500">
-              احفظ نسخة كاملة من بيانات المعمل، اللوجو، الجوائز، الروابط، والأسعار المعدلة في ملف واحد، أو استعدها في أي وقت.
+              احفظ نسخة JSON شاملة (بيانات المعمل، الشعار، الجوائز، الروابط، وقائمة الأسعار) أو استعد نسخة سابقة.
             </p>
           </div>
-          <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
             <button
               type="button"
-              onClick={handleExportFullBackup}
               disabled={exporting}
+              onClick={handleExportFullBackup}
               className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-teal-700 px-4 py-2 text-xs font-extrabold text-white hover:bg-teal-800 cursor-pointer whitespace-nowrap"
             >
               <Download className="h-4 w-4" />
-              <span>{exporting ? 'جاري التصدير...' : 'تصدير نسخة كاملة (JSON)'}</span>
+              <span>{exporting ? 'جاري التصدير...' : 'حفظ نسخة احتياطية كاملة (JSON)'}</span>
             </button>
 
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={importing}
-              className="inline-flex min-h-[44px] items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-2 text-xs font-extrabold text-slate-800 hover:bg-slate-50 cursor-pointer whitespace-nowrap"
-            >
-              <Upload className="h-4 w-4 text-teal-700" />
-              <span>{importing ? 'جاري الاستيراد...' : 'استيراد نسخة (JSON)'}</span>
-            </button>
             <input
               ref={fileInputRef}
               type="file"
@@ -239,6 +228,15 @@ export function AdminPricesBackupTab({
               onChange={handleImportFile}
               className="hidden"
             />
+            <button
+              type="button"
+              disabled={importing}
+              onClick={() => fileInputRef.current?.click()}
+              className="inline-flex min-h-[44px] items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-bold text-slate-800 hover:bg-slate-50 cursor-pointer whitespace-nowrap"
+            >
+              <Upload className="h-4 w-4" />
+              <span>{importing ? 'جاري الاستيراد...' : 'استيراد نسخة (JSON)'}</span>
+            </button>
 
             <button
               type="button"

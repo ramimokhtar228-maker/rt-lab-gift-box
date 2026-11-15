@@ -1,177 +1,134 @@
-import { useEffect, useState } from 'react';
-import { Image as ImageIcon, KeyRound, Plus, RotateCcw, Save, Trash2 } from 'lucide-react';
+import { useRef, useState } from 'react';
+import { ImagePlus, Plus, RotateCcw, Save, Trash2 } from 'lucide-react';
 import type { LabProfile } from '../types';
-import { apiClient, DEFAULT_ASSET_ICON, DEFAULT_ASSET_LOGO } from '../services/apiClient';
+import { apiClient } from '../services/apiClient';
+
+const BASE_PATH = import.meta.env.BASE_URL || '/';
+const DEFAULT_ASSET_LOGO = `${BASE_PATH}logo.jpg`;
+const DEFAULT_ASSET_ICON = `${BASE_PATH}icon.svg`;
 
 interface AdminSettingsTabProps {
   labProfile: LabProfile;
-  adminToken: string;
   onProfileSaved: (updated: LabProfile) => void;
   onNotify: (msg: string, isError?: boolean) => void;
 }
 
-async function compressLogoFile(file: File, maxDim = 512): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error('تعذر قراءة الصورة'));
-    reader.onload = () => {
-      const img = new window.Image();
-      img.onerror = () => reject(new Error('صيغة الصورة غير صالحة'));
-      img.onload = () => {
-        const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
-        const w = Math.max(1, Math.round(img.width * scale));
-        const h = Math.max(1, Math.round(img.height * scale));
-        const canvas = document.createElement('canvas');
-        canvas.width = w;
-        canvas.height = h;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-          resolve(String(reader.result || ''));
-          return;
-        }
-        ctx.drawImage(img, 0, 0, w, h);
-        const mime = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
-        resolve(canvas.toDataURL(mime, 0.88));
-      };
-      img.src = String(reader.result || '');
-    };
-    reader.readAsDataURL(file);
-  });
-}
-
 export function AdminSettingsTab({
   labProfile,
-  adminToken,
   onProfileSaved,
   onNotify,
 }: AdminSettingsTabProps) {
-  const [form, setForm] = useState<LabProfile>({ ...labProfile });
+  const [form, setForm] = useState<LabProfile>(labProfile);
   const [newBranch, setNewBranch] = useState('');
-  const [newPassword, setNewPassword] = useState('');
   const [saving, setSaving] = useState(false);
+  const fileRef = useRef<HTMLInputElement | null>(null);
 
-  useEffect(() => {
-    setForm({ ...labProfile });
-  }, [labProfile]);
-
-  const handleLogoFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (!file.type.startsWith('image/')) {
-      onNotify('يرجى اختيار ملف صورة صالح (PNG/JPG).', true);
+    if (file.size > 350 * 1024) {
+      onNotify('يرجى اختيار صورة لوجو أصغر من 350 كيلوبايت لضمان سرعة المزامنة.', true);
       return;
     }
-    try {
-      const compressed = await compressLogoFile(file, 512);
-      setForm((prev) => ({ ...prev, logoUrl: compressed }));
-      onNotify('تم تجهيز الشعار الجديد — اضغط حفظ لتثبيته.');
-    } catch {
-      onNotify('تعذر معالجة الصورة المختارة.', true);
-    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        setForm((prev) => ({ ...prev, logoUrl: reader.result as string }));
+        onNotify('تم تحميل الشعار الجديد — اضغط "حفظ الإعدادات" لتثبيته.');
+      }
+    };
+    reader.readAsDataURL(file);
   };
 
   const handleAddBranch = () => {
     const clean = newBranch.trim();
     if (!clean) return;
-    if (!form.branches.includes(clean)) {
-      setForm((prev) => ({ ...prev, branches: [...prev.branches, clean] }));
-    }
+    setForm((prev) => ({ ...prev, branches: [...prev.branches, clean] }));
     setNewBranch('');
   };
 
   const handleRemoveBranch = (idx: number) => {
-    if (form.branches.length <= 1) {
-      onNotify('يجب الإبقاء على فرع واحد على الأقل.', true);
-      return;
-    }
     setForm((prev) => ({
       ...prev,
       branches: prev.branches.filter((_, i) => i !== idx),
     }));
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     if (saving) return;
-    if (newPassword.trim() && newPassword.trim().length < 4) {
-      onNotify('كلمة المرور الجديدة يجب أن تكون 4 أحرف على الأقل.', true);
-      return;
-    }
     setSaving(true);
     try {
-      const payload: Record<string, unknown> = { ...form };
-      if (newPassword.trim()) {
-        payload.newAdminPassword = newPassword.trim();
-      }
-      const data = await apiClient.updateLabProfile(adminToken, payload);
+      const data = await apiClient.updateLabProfile(form);
       if (!data.ok || !data.labProfile) {
-        onNotify(data.message || 'تعذر حفظ بيانات المعمل.', true);
+        onNotify(data.message || 'تعذر حفظ الإعدادات.', true);
       } else {
-        setNewPassword('');
         onProfileSaved(data.labProfile);
-        onNotify('تم حفظ بيانات المعمل واللوجو بنجاح.');
+        onNotify(data.message || 'تم حفظ وتثبيت بيانات المعمل والشعار في السحابة.');
       }
     } catch {
-      onNotify('تعذر الاتصال بالخادم.', true);
+      onNotify('تعذر الاتصال بقاعدة البيانات.', true);
     } finally {
       setSaving(false);
     }
   };
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-6">
-      {/* Lab Identity & Logo */}
+    <form onSubmit={handleSave} className="space-y-6">
+      {/* Logo & Identity */}
       <section className="rounded-2xl border border-slate-200 bg-white p-5 sm:p-6 space-y-5">
         <div>
           <h2 className="text-base font-extrabold text-slate-900">
-            بيانات المعمل والشعار (Logo)
+            شعار المعمل والبيانات الأساسية
           </h2>
           <p className="text-xs text-slate-500">
-            يظهر الاسم والشعار وبيانات التواصل تلقائياً للمريض داخل صفحة صندوق السعادة ورسائل الواتساب.
+            تظهر هذه البيانات والشعار في صفحة صندوق السعادة ورسائل الواتساب.
           </p>
         </div>
 
-        {/* Logo Editor */}
-        <div className="flex flex-wrap items-center gap-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+        <div className="flex flex-col items-start gap-4 rounded-2xl border border-slate-200 bg-slate-50 p-4 sm:flex-row sm:items-center">
           <img
             src={form.logoUrl === '/logo.jpg' ? DEFAULT_ASSET_LOGO : form.logoUrl || DEFAULT_ASSET_LOGO}
-            alt={form.labName}
+            alt="شعار المعمل"
             referrerPolicy="no-referrer"
             onError={(e) => {
               (e.currentTarget as HTMLImageElement).src = DEFAULT_ASSET_ICON;
             }}
-            className="h-20 w-20 rounded-2xl border border-slate-200 bg-white object-contain p-1"
+            className="h-20 w-20 shrink-0 rounded-2xl border border-slate-200 bg-white object-contain p-1"
           />
-          <div className="space-y-2">
+          <div className="flex-1 space-y-2">
+            <p className="text-xs font-bold text-slate-800">لوجو المعمل الحالي</p>
             <div className="flex flex-wrap items-center gap-2">
-              <label className="inline-flex min-h-[40px] items-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-2 text-xs font-bold text-slate-800 hover:bg-slate-100 cursor-pointer">
-                <ImageIcon className="h-4 w-4 text-teal-700" />
-                <span>تغيير لوجو المعمل (صورة من جهازك)</span>
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={handleLogoFile}
-                  className="hidden"
-                />
-              </label>
+              <input
+                ref={fileRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp,image/svg+xml"
+                onChange={handleLogoUpload}
+                className="hidden"
+              />
+              <button
+                type="button"
+                onClick={() => fileRef.current?.click()}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-teal-700 px-3.5 py-2 text-xs font-bold text-white hover:bg-teal-800 cursor-pointer"
+              >
+                <ImagePlus className="h-3.5 w-3.5" />
+                <span>تغيير اللوجو (رفع صورة)</span>
+              </button>
               <button
                 type="button"
                 onClick={() => setForm((prev) => ({ ...prev, logoUrl: DEFAULT_ASSET_LOGO }))}
-                className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 cursor-pointer"
+                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-bold text-slate-700 hover:bg-slate-100 cursor-pointer"
               >
                 <RotateCcw className="h-3.5 w-3.5" />
-                <span>استعادة اللوجو الرسمي</span>
+                <span>استعادة شعار RT الافتراضي</span>
               </button>
             </div>
-            <p className="text-[11px] text-slate-500">
-              يُفضل رفع صورة مربعة PNG أو JPG بحجم واضح.
-            </p>
           </div>
         </div>
 
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div>
-            <label className="mb-1 block text-xs font-bold text-slate-700">اسم المعمل</label>
+            <label className="mb-1 block text-xs font-bold text-slate-700">اسم المعمل *</label>
             <input
               type="text"
               required
@@ -278,7 +235,7 @@ export function AdminSettingsTab({
             قوالب رسائل الواتساب التلقائية
           </h2>
           <p className="text-xs text-slate-500">
-            المتغيرات المتاحة: {'{clientName}'} {'{labName}'} {'{prizeTitle}'} {'{discountLabel}'} {'{prizeCode}'} {'{expiresAt}'} {'{boxUrl}'}
+            المتغيرات المتاحة: {'{clientName}'} {'{labName}'} {'{prizeTitle}'} {'{discountLabel}'} {'{prizeCode}'} {'{expiresAt}'} {'{appointmentAt}'} {'{boxUrl}'}
           </p>
         </div>
 
@@ -307,7 +264,7 @@ export function AdminSettingsTab({
           </div>
           <div>
             <label className="mb-1 block text-xs font-bold text-slate-700">
-              3. رد المعمل للمريض بأنه كسب والوقت المحدد
+              3. رد المعمل للمريض بالفوز وتحديد الموعد
             </label>
             <textarea
               rows={5}
@@ -317,25 +274,6 @@ export function AdminSettingsTab({
             />
           </div>
         </div>
-      </section>
-
-      {/* Change Admin Password */}
-      <section className="rounded-2xl border border-slate-200 bg-white p-5 sm:p-6 space-y-3">
-        <div className="flex items-center gap-2">
-          <KeyRound className="h-4 w-4 text-teal-700" />
-          <h2 className="text-base font-extrabold text-slate-900">تغيير كلمة مرور الإدارة</h2>
-        </div>
-        <p className="text-xs text-slate-500">
-          اترك الحقل فارغاً إذا لم ترغب في تغيير كلمة المرور الحالية. كلمة المرور مخفية تماماً عن العملاء.
-        </p>
-        <input
-          type="password"
-          dir="ltr"
-          value={newPassword}
-          onChange={(e) => setNewPassword(e.target.value)}
-          placeholder="أدخل كلمة مرور جديدة (اختياري)"
-          className="w-full max-w-sm rounded-xl border border-slate-300 px-3.5 py-2.5 text-left font-mono text-sm focus:border-teal-700 focus:outline-none"
-        />
       </section>
 
       <div className="flex justify-end">

@@ -1,16 +1,15 @@
 import { useState } from 'react';
-import { Clock, Edit3, Gift, Plus, Save, Trash2, X } from 'lucide-react';
+import { Clock, Edit3, Gift, Plus, Save, Trash2 } from 'lucide-react';
 import type { Prize, PrizeCategory } from '../types';
 import { apiClient } from '../services/apiClient';
 
 interface AdminPrizesTabProps {
   prizes: Prize[];
-  adminToken: string;
   onRefresh: () => Promise<void>;
   onNotify: (msg: string, isError?: boolean) => void;
 }
 
-const EMPTY_FORM: Partial<Prize> = {
+const EMPTY_PRIZE: Partial<Prize> = {
   title: '',
   description: '',
   discountLabel: 'خصم 25%',
@@ -23,7 +22,6 @@ const EMPTY_FORM: Partial<Prize> = {
 
 export function AdminPrizesTab({
   prizes,
-  adminToken,
   onRefresh,
   onNotify,
 }: AdminPrizesTabProps) {
@@ -32,19 +30,19 @@ export function AdminPrizesTab({
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editing?.title?.trim() || saving) return;
+    if (!editing || saving) return;
     setSaving(true);
     try {
-      const data = await apiClient.upsertPrize(adminToken, editing);
+      const data = await apiClient.upsertPrize(editing);
       if (!data.ok) {
         onNotify(data.message || 'تعذر حفظ الجائزة.', true);
       } else {
         setEditing(null);
         await onRefresh();
-        onNotify('تم حفظ الجائزة داخل صندوق السعادة بنجاح.');
+        onNotify('تم حفظ الجائزة وتحديث الصندوق بنجاح.');
       }
     } catch {
-      onNotify('تعذر الاتصال بالخادم.', true);
+      onNotify('تعذر الاتصال بقاعدة البيانات.', true);
     } finally {
       setSaving(false);
     }
@@ -52,25 +50,25 @@ export function AdminPrizesTab({
 
   const handleToggleActive = async (prize: Prize) => {
     try {
-      const data = await apiClient.upsertPrize(adminToken, { ...prize, active: !prize.active });
+      const data = await apiClient.upsertPrize({ ...prize, active: !prize.active });
       if (data.ok) {
         await onRefresh();
-        onNotify(prize.active ? 'تم إيقاف الجائزة مؤقتاً.' : 'تم تفعيل الجائزة.');
+        onNotify(prize.active ? 'تم إيقاف الجائزة مؤقتاً.' : 'تم تفعيل الجائزة بالصندوق.');
       }
     } catch {
-      onNotify('تعذر تحديث حالة الجائزة.', true);
+      onNotify('تعذر التحديث.', true);
     }
   };
 
   const handleDelete = async (id: string) => {
     try {
-      const ok = await apiClient.deletePrize(adminToken, id);
+      const ok = await apiClient.deletePrize(id);
       if (ok) {
         await onRefresh();
-        onNotify('تم حذف الجائزة من الصندوق.');
+        onNotify('تم حذف الجائزة.');
       }
     } catch {
-      onNotify('تعذر حذف الجائزة.', true);
+      onNotify('تعذر الحذف.', true);
     }
   };
 
@@ -84,19 +82,19 @@ export function AdminPrizesTab({
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white p-5 sm:p-6">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white p-5">
         <div>
           <h2 className="text-base font-extrabold text-slate-900">
-            إدارة الجوائز داخل صندوق السعادة ({prizes.length})
+            جوائز صندوق السعادة ووقتها المحدد
           </h2>
           <p className="text-xs text-slate-500">
-            أضف أو عدّل الجوائز وحدد المدة الزمنية (بالساعات) المتاحة للمريض بعد فتح الصندوق.
+            أضف أو عدّل الجوائز وحدد مدة صلاحية كل جائزة بالساعات بعد فتح المريض للصندوق.
           </p>
         </div>
         <button
           type="button"
-          onClick={() => setEditing({ ...EMPTY_FORM })}
-          className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-teal-700 px-5 py-2.5 text-xs font-extrabold text-white hover:bg-teal-800 cursor-pointer whitespace-nowrap"
+          onClick={() => setEditing({ ...EMPTY_PRIZE })}
+          className="inline-flex min-h-[42px] items-center gap-1.5 rounded-xl bg-teal-700 px-4 py-2 text-xs font-extrabold text-white hover:bg-teal-800 cursor-pointer whitespace-nowrap"
         >
           <Plus className="h-4 w-4" />
           <span>إضافة جائزة جديدة</span>
@@ -107,56 +105,44 @@ export function AdminPrizesTab({
       {editing ? (
         <form
           onSubmit={handleSave}
-          className="rounded-2xl border border-teal-200 bg-white p-5 shadow-sm sm:p-6 space-y-4"
+          className="space-y-4 rounded-2xl border border-teal-200 bg-white p-5 sm:p-6"
         >
-          <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-            <h3 className="text-sm font-extrabold text-slate-900">
-              {editing.id ? 'تعديل الجائزة' : 'إضافة جائزة جديدة للصندوق'}
-            </h3>
-            <button
-              type="button"
-              onClick={() => setEditing(null)}
-              className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 cursor-pointer"
-            >
-              <X className="h-4 w-4" />
-            </button>
-          </div>
-
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            <div className="sm:col-span-2">
-              <label className="mb-1 block text-xs font-bold text-slate-700">عنوان الجائزة *</label>
+          <h3 className="text-sm font-extrabold text-teal-900">
+            {editing.id ? 'تعديل الجائزة' : 'إضافة جائزة جديدة للصندوق'}
+          </h3>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div>
+              <label className="mb-1 block text-xs font-bold text-slate-700">اسم الجائزة *</label>
               <input
                 type="text"
                 required
                 value={editing.title || ''}
                 onChange={(e) => setEditing({ ...editing, title: e.target.value })}
-                placeholder="مثال: خصم 30% على باقة الفحص الشامل"
+                placeholder="مثال: تحليل فيتامين د مجاناً"
                 className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm focus:border-teal-700 focus:outline-none"
               />
             </div>
-
             <div>
-              <label className="mb-1 block text-xs font-bold text-slate-700">ملخص الخصم / الهدية</label>
+              <label className="mb-1 block text-xs font-bold text-slate-700">الشارة المختصرة *</label>
               <input
                 type="text"
+                required
                 value={editing.discountLabel || ''}
                 onChange={(e) => setEditing({ ...editing, discountLabel: e.target.value })}
-                placeholder="مثال: خصم 30% أو مجاني 100%"
+                placeholder="مثال: مجاني 100% أو خصم 30%"
                 className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm focus:border-teal-700 focus:outline-none"
               />
             </div>
-
             <div className="sm:col-span-2">
-              <label className="mb-1 block text-xs font-bold text-slate-700">وصف الجائزة للمريض</label>
-              <input
-                type="text"
+              <label className="mb-1 block text-xs font-bold text-slate-700">وصف الجائزة وشروطها</label>
+              <textarea
+                rows={2}
                 value={editing.description || ''}
                 onChange={(e) => setEditing({ ...editing, description: e.target.value })}
                 placeholder="تفاصيل الاستفادة من الجائزة..."
-                className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm focus:border-teal-700 focus:outline-none"
+                className="w-full rounded-xl border border-slate-300 px-3.5 py-2 text-sm focus:border-teal-700 focus:outline-none"
               />
             </div>
-
             <div>
               <label className="mb-1 block text-xs font-bold text-slate-700">التصنيف</label>
               <select
@@ -171,7 +157,6 @@ export function AdminPrizesTab({
                 <option value="gift">هدية خاصة</option>
               </select>
             </div>
-
             <div>
               <label className="mb-1 block text-xs font-bold text-slate-700">
                 المدة المحددة بعد الفتح (بالساعات) *
@@ -200,7 +185,6 @@ export function AdminPrizesTab({
                 </div>
               </div>
             </div>
-
             <div>
               <label className="mb-1 block text-xs font-bold text-slate-700">احتمالية الظهور (الوزن)</label>
               <input
@@ -212,7 +196,6 @@ export function AdminPrizesTab({
                 className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-center font-mono text-sm focus:border-teal-700 focus:outline-none"
               />
             </div>
-
             <div>
               <label className="mb-1 block text-xs font-bold text-slate-700">العدد المتاح (المخزون)</label>
               <input

@@ -1,26 +1,17 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Component, type ErrorInfo, type ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
+import { onAuthStateChanged, signOut, type User } from 'firebase/auth';
 import { Lock, MessageCircle } from 'lucide-react';
 import type { LabProfile } from './types';
-import { PatientBoxView } from './components/PatientBoxView';
-import { AdminLoginModal } from './components/AdminLoginModal';
-import { AdminPanelView } from './components/AdminPanelView';
-import { apiClient, DEFAULT_ASSET_ICON, DEFAULT_ASSET_LOGO } from './services/apiClient';
+import { ADMIN_BOOTSTRAP_EMAIL, auth } from './firebase';
+import { apiClient, DEFAULT_LAB_PROFILE } from './services/apiClient';
 import { formatWhatsAppPhone, resolvePublicBaseUrl } from './utils/whatsapp';
+import { PatientBoxView } from './components/PatientBoxView';
+import { AdminPanelView } from './components/AdminPanelView';
+import { AdminLoginModal } from './components/AdminLoginModal';
 
-const FALLBACK_LAB_PROFILE: LabProfile = {
-  labName: 'معامل RT للتحاليل التشخيصية',
-  tagline: 'دقة التشخيص .. رعاية متكاملة لأجل صحتك',
-  director: 'د. رامي مختار — استشاري الباثولوجيا الإكلينيكية',
-  hotlineNumber: '01100046841',
-  whatsappNumber: '201100874444',
-  address: 'ميدان بهتيم، برج صيدلية العزبي، الدور الثالث، شبرا الخيمة',
-  workingHours: 'يومياً من 10:00 صباحاً إلى 10:00 مساءً',
-  branches: ['الفرع الرئيسي - شبرا الخيمة', 'وحدة السحب المنزلي السريع'],
-  logoUrl: DEFAULT_ASSET_LOGO,
-  whatsappInviteTemplate: '',
-  whatsappWinnerReplyTemplate: '',
-  whatsappPatientClaimTemplate: '',
-};
+const BASE_PATH = import.meta.env.BASE_URL || '/';
+const DEFAULT_ASSET_LOGO = `${BASE_PATH}logo.jpg`;
+const DEFAULT_ASSET_ICON = `${BASE_PATH}icon.svg`;
 
 function readInitialUrlState(): { token: string | null; encodedData: string | null; wantsAdmin: boolean } {
   if (typeof window === 'undefined') return { token: null, encodedData: null, wantsAdmin: false };
@@ -40,25 +31,75 @@ function readInitialUrlState(): { token: string | null; encodedData: string | nu
   return { token, encodedData, wantsAdmin };
 }
 
-export default function App() {
+class AppErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean }> {
+  constructor(props: { children: ReactNode }) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError(): { hasError: boolean } {
+    return { hasError: true };
+  }
+  componentDidCatch(error: Error, info: ErrorInfo): void {
+    console.error('Application error:', error, info);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div dir="rtl" className="flex min-h-screen items-center justify-center bg-slate-50 p-6 text-center">
+          <div className="max-w-md space-y-4 rounded-3xl border border-slate-200 bg-white p-8 shadow-sm">
+            <h1 className="text-lg font-extrabold text-slate-900">حدث خطأ غير متوقع</h1>
+            <p className="text-xs leading-relaxed text-slate-600">
+              يرجى تحديث الصفحة للمتابعة. في حال استمرار المشكلة تأكد من اتصالك بالإنترنت وصلاحيات الحساب.
+            </p>
+            <button
+              type="button"
+              onClick={() => window.location.reload()}
+              className="rounded-xl bg-teal-700 px-5 py-2.5 text-xs font-extrabold text-white hover:bg-teal-800 cursor-pointer"
+            >
+              إعادة تحميل الصفحة
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function isAuthorizedAdminUser(user: User | null): boolean {
+  if (!user || !user.email || !user.emailVerified) return false;
+  return user.email.toLowerCase() === ADMIN_BOOTSTRAP_EMAIL.toLowerCase();
+}
+
+function AppContent() {
   const initial = useMemo(() => readInitialUrlState(), []);
-  const [labProfile, setLabProfile] = useState<LabProfile>(FALLBACK_LAB_PROFILE);
+  const [labProfile, setLabProfile] = useState<LabProfile>(DEFAULT_LAB_PROFILE);
   const [serverShareBaseUrl, setServerShareBaseUrl] = useState<string>('');
   const [boxToken, setBoxToken] = useState<string | null>(initial.token);
   const [encodedBoxData, setEncodedBoxData] = useState<string | null>(initial.encodedData);
-  const [adminToken, setAdminToken] = useState<string | null>(() => {
-    try {
-      return window.sessionStorage.getItem('rt_hb_admin_token');
-    } catch {
-      return null;
-    }
-  });
-  const [view, setView] = useState<'box' | 'admin'>(() =>
-    initial.wantsAdmin && adminToken ? 'admin' : 'box'
-  );
-  const [isLoginModalOpen, setIsLoginModalOpen] = useState<boolean>(
-    () => initial.wantsAdmin && !adminToken
-  );
+
+  const [authReady, setAuthReady] = useState(false);
+  const [isAdminAuthed, setIsAdminAuthed] = useState(false);
+  const [view, setView] = useState<'box' | 'admin'>('box');
+  const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (user) => {
+      const authorized = isAuthorizedAdminUser(user);
+      setIsAdminAuthed(authorized);
+      setAuthReady(true);
+      if (initial.wantsAdmin) {
+        if (authorized) {
+          setView('admin');
+          setIsLoginModalOpen(false);
+        } else {
+          setView('box');
+          setIsLoginModalOpen(true);
+        }
+      }
+    });
+    return () => unsub();
+  }, [initial.wantsAdmin]);
 
   useEffect(() => {
     apiClient
@@ -94,7 +135,7 @@ export default function App() {
   };
 
   const handleAdminClick = () => {
-    if (adminToken) {
+    if (authReady && isAdminAuthed) {
       setView('admin');
       syncUrl('admin', null);
     } else {
@@ -102,39 +143,23 @@ export default function App() {
     }
   };
 
-  const handleAuthenticated = (token: string) => {
-    setAdminToken(token);
-    try {
-      window.sessionStorage.setItem('rt_hb_admin_token', token);
-    } catch {
-      // ignore storage errors
-    }
+  const handleAuthenticated = () => {
+    setIsAdminAuthed(true);
     setIsLoginModalOpen(false);
     setView('admin');
     syncUrl('admin', null);
   };
 
-  const handleLogout = useCallback(() => {
-    setAdminToken(null);
+  const handleLogout = useCallback(async () => {
     try {
-      window.sessionStorage.removeItem('rt_hb_admin_token');
+      await signOut(auth);
     } catch {
-      // ignore storage errors
+      // ignore
     }
+    setIsAdminAuthed(false);
     setView('box');
     syncUrl('box', boxToken);
   }, [boxToken]);
-
-  const handleSessionExpired = useCallback(() => {
-    setAdminToken(null);
-    try {
-      window.sessionStorage.removeItem('rt_hb_admin_token');
-    } catch {
-      // ignore storage errors
-    }
-    setView('box');
-    setIsLoginModalOpen(true);
-  }, []);
 
   const handlePreviewBox = (token?: string) => {
     const nextToken = token ?? boxToken;
@@ -159,7 +184,11 @@ export default function App() {
             className="flex items-center gap-2.5 text-base font-extrabold tracking-tight text-slate-900 whitespace-nowrap shrink-0 cursor-pointer sm:text-lg"
           >
             <img
-              src={labProfile.logoUrl === '/logo.jpg' ? DEFAULT_ASSET_LOGO : labProfile.logoUrl || DEFAULT_ASSET_LOGO}
+              src={
+                labProfile.logoUrl === '/logo.jpg'
+                  ? DEFAULT_ASSET_LOGO
+                  : labProfile.logoUrl || DEFAULT_ASSET_LOGO
+              }
               alt={labProfile.labName}
               referrerPolicy="no-referrer"
               onError={(e) => {
@@ -192,12 +221,10 @@ export default function App() {
 
       {/* Main Content */}
       <main className="flex-1">
-        {view === 'admin' && adminToken ? (
+        {view === 'admin' && isAdminAuthed ? (
           <AdminPanelView
-            adminToken={adminToken}
             shareBaseUrl={publicShareBaseUrl}
             onLogout={handleLogout}
-            onSessionExpired={handleSessionExpired}
             onProfileUpdated={setLabProfile}
             onPreviewBox={(t) => {
               setEncodedBoxData(null);
@@ -243,12 +270,20 @@ export default function App() {
         </div>
       </footer>
 
-      {/* Hidden Password Gate Modal */}
+      {/* Google Auth Admin Gate Modal */}
       <AdminLoginModal
         isOpen={isLoginModalOpen}
         onClose={() => setIsLoginModalOpen(false)}
         onAuthenticated={handleAuthenticated}
       />
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <AppErrorBoundary>
+      <AppContent />
+    </AppErrorBoundary>
   );
 }

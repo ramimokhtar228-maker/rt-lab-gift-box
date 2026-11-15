@@ -19,6 +19,7 @@ export function playBoxOpenChime(muted = false): void {
   if (muted) return;
   const ctx = getAudioCtx();
   if (!ctx) return;
+
   const notes = [523.25, 659.25, 783.99, 1046.5];
   notes.forEach((freq, idx) => {
     const start = ctx.currentTime + idx * 0.07;
@@ -26,9 +27,11 @@ export function playBoxOpenChime(muted = false): void {
     const gain = ctx.createGain();
     osc.type = 'sine';
     osc.frequency.setValueAtTime(freq, start);
+
     gain.gain.setValueAtTime(0.001, start);
     gain.gain.linearRampToValueAtTime(0.09, start + 0.02);
     gain.gain.exponentialRampToValueAtTime(0.001, start + 0.38);
+
     osc.connect(gain);
     gain.connect(ctx.destination);
     osc.start(start);
