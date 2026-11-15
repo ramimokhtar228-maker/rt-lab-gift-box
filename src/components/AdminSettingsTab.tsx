@@ -186,6 +186,19 @@ export function AdminSettingsTab({
               className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm focus:border-teal-700 focus:outline-none"
             />
           </div>
+          <div className="sm:col-span-2">
+            <label className="mb-1 block text-xs font-bold text-slate-700">
+              رابط بوابة المرضى العام (تُنشأ منه روابط المرضى)
+            </label>
+            <input
+              type="url"
+              dir="ltr"
+              value={form.shareBaseUrl || ''}
+              onChange={(e) => setForm({ ...form, shareBaseUrl: e.target.value })}
+              placeholder="https://ramimokhtar228-maker.github.io/rt-lab-gift-box"
+              className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-left font-mono text-xs focus:border-teal-700 focus:outline-none"
+            />
+          </div>
         </div>
 
         {/* Branches */}

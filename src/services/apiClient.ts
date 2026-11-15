@@ -50,7 +50,7 @@ export const DEFAULT_LAB_PROFILE: LabProfile = {
     'ألف مبروك يا {clientName} 🎉\nتم تأكيد فوزك من {labName} بجائزة:\n🎁 {prizeTitle} ({discountLabel})\n🔑 كود الجائزة: {prizeCode}\n⏳ الجائزة متاحة لوقت محدد وتنتهي صلاحيتها في: {expiresAt}\n📅 الموعد المحدد: {appointmentAt}\n\nيسعدنا تشريفك في أقرب فرع أو حجز السحب المنزلي قبل انتهاء الموعد!',
   whatsappPatientClaimTemplate:
     'مرحباً {labName}، فتحت صندوق السعادة وكسبت الجائزة التالية:\nالاسم: {clientName}\nالجائزة: {prizeTitle} ({discountLabel})\nكود الجائزة: {prizeCode}\nصالحة حتى: {expiresAt}\nأرغب في تأكيد تفعيل الجائزة وحجز الموعد.',
-  shareBaseUrl: '',
+  shareBaseUrl: 'https://ramimokhtar228-maker.github.io/rt-lab-gift-box',
 };
 
 export const DEFAULT_PRIZES: Prize[] = [

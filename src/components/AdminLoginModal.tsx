@@ -135,15 +135,23 @@ export function AdminLoginModal({
                       <span>{copiedDomain ? 'نُسخ' : 'نسخ'}</span>
                     </button>
                   </div>
-                  <a
-                    href={`https://console.firebase.google.com/project/${FIREBASE_PROJECT_ID}/authentication/settings`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 font-bold text-teal-800 underline"
-                  >
-                    <span>فتح إعدادات Firebase Console</span>
-                    <ExternalLink className="h-3 w-3" />
-                  </a>
+                  <div className="flex flex-wrap items-center gap-3 pt-1">
+                    <a
+                      href={`https://console.firebase.google.com/project/${FIREBASE_PROJECT_ID}/authentication/settings`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 font-bold text-teal-800 underline"
+                    >
+                      <span>فتح إعدادات Firebase Console</span>
+                      <ExternalLink className="h-3 w-3" />
+                    </a>
+                    <a
+                      href="https://ais-pre-uktgxyai3tq7v64jdhupar-928451427848.europe-west2.run.app/?view=admin"
+                      className="inline-flex items-center gap-1 rounded-lg bg-teal-700 px-2.5 py-1.5 font-bold text-white hover:bg-teal-800"
+                    >
+                      <span>أو افتح الإدارة فوراً من الرابط المعتمد</span>
+                    </a>
+                  </div>
                 </div>
               ) : null}
             </div>
