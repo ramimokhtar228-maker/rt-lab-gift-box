@@ -53,7 +53,10 @@
         "title": { "type": "string", "minLength": 1, "maxLength": 200 },
         "description": { "type": "string", "maxLength": 600 },
         "discountLabel": { "type": "string", "minLength": 1, "maxLength": 80 },
-        "category": { "type": "string", "enum": ["discount", "free_test", "package", "home_visit", "gift"] },
+        "category": {
+          "type": "string",
+          "enum": ["DISCOUNT", "FREE_SERVICE", "PHYSICAL_GIFT", "SURPRISE", "discount", "free_test", "package", "home_visit", "gift"]
+        },
         "validHours": { "type": "number" },
         "weight": { "type": "number" },
         "stock": { "type": "number" },

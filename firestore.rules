@@ -130,7 +130,7 @@ service cloud.firestore {
       data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
       data.description is string && data.description.size() <= 600 &&
       data.discountLabel is string && data.discountLabel.size() >= 1 && data.discountLabel.size() <= 80 &&
-      data.category in ['discount', 'free_test', 'package', 'home_visit', 'gift'] &&
+      data.category in ['DISCOUNT', 'FREE_SERVICE', 'PHYSICAL_GIFT', 'SURPRISE', 'discount', 'free_test', 'package', 'home_visit', 'gift'] &&
       data.validHours is number && data.validHours >= 1 && data.validHours <= 2160 &&
       data.weight is number && data.weight >= 1 && data.weight <= 1000 &&
       data.stock is number && data.stock >= 1 && data.stock <= 100000 &&

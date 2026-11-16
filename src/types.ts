@@ -1,4 +1,13 @@
-export type PrizeCategory = 'discount' | 'free_test' | 'package' | 'home_visit' | 'gift';
+export type PrizeCategory =
+  | 'DISCOUNT'
+  | 'FREE_SERVICE'
+  | 'PHYSICAL_GIFT'
+  | 'SURPRISE'
+  | 'discount'
+  | 'free_test'
+  | 'package'
+  | 'home_visit'
+  | 'gift';
 
 export type LinkStatus = 'pending' | 'opened' | 'redeemed' | 'expired';
 

@@ -13,6 +13,7 @@ import {
   where,
   writeBatch,
 } from 'firebase/firestore';
+import { DEFAULT_PRIZES } from '../data/defaultPrizes';
 import { INITIAL_PRICES } from '../data/initialPrices';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import type {
@@ -53,68 +54,7 @@ export const DEFAULT_LAB_PROFILE: LabProfile = {
   shareBaseUrl: 'https://ramimokhtar228-maker.github.io/rt-lab-gift-box',
 };
 
-export const DEFAULT_PRIZES: Prize[] = [
-  {
-    id: 'prz_cbc_free',
-    title: 'تحليل صورة دم كاملة (CBC) مجاناً',
-    description: 'تحليل صورة الدم الكاملة مجاناً بالكامل في معامل RT خلال الفترة المحددة للجائزة.',
-    discountLabel: 'مجاني 100%',
-    category: 'free_test',
-    validHours: 72,
-    weight: 22,
-    stock: 50,
-    usedCount: 0,
-    active: true,
-  },
-  {
-    id: 'prz_pkg_30',
-    title: 'خصم 30% على باقة الفحص الشامل',
-    description: 'خصم فوري 30% على باقة الاطمئنان الشاملة (كبد، كلى، دهون، وسكر تراكمي).',
-    discountLabel: 'خصم 30%',
-    category: 'package',
-    validHours: 72,
-    weight: 25,
-    stock: 100,
-    usedCount: 0,
-    active: true,
-  },
-  {
-    id: 'prz_hba1c_free',
-    title: 'تحليل سكر تراكمي (HbA1c) مجاناً',
-    description: 'تحليل السكر التراكمي مجاناً لمتابعة مستوى السكر بدقة.',
-    discountLabel: 'مجاني 100%',
-    category: 'free_test',
-    validHours: 48,
-    weight: 18,
-    stock: 40,
-    usedCount: 0,
-    active: true,
-  },
-  {
-    id: 'prz_home_20',
-    title: 'سحب منزلي مجاني + خصم 20% على التحاليل',
-    description: 'خدمة سحب عينات من المنزل مجاناً بدون رسوم انتقال مع خصم 20% على إجمالي الفاتورة.',
-    discountLabel: 'سحب مجاني + 20%',
-    category: 'home_visit',
-    validHours: 96,
-    weight: 20,
-    stock: 80,
-    usedCount: 0,
-    active: true,
-  },
-  {
-    id: 'prz_vitd_40',
-    title: 'خصم 40% على تحليل فيتامين د (Vitamin D)',
-    description: 'خصم خاص 40% على فحص فيتامين د في جميع فروع المعمل أو السحب المنزلي.',
-    discountLabel: 'خصم 40%',
-    category: 'discount',
-    validHours: 48,
-    weight: 15,
-    stock: 60,
-    usedCount: 0,
-    active: true,
-  },
-];
+export { DEFAULT_PRIZES };
 
 interface DecodedBoxPayload {
   n?: string;
@@ -151,6 +91,13 @@ function normalizeId(raw: string): string {
     .toUpperCase()
     .replace(/[^A-Z0-9_-]/g, '')
     .slice(0, 64);
+}
+
+function normalizeDocId(raw: string): string {
+  return raw
+    .trim()
+    .replace(/[^a-zA-Z0-9_-]/g, '')
+    .slice(0, 128);
 }
 
 function randomCode(prefix: string, len: number): string {
@@ -683,7 +630,22 @@ export const apiClient = {
         hasWrites = true;
       }
 
-      if (prizesSnap.empty) {
+      const starterIds = new Set([
+        'prz_cbc_free',
+        'prz_pkg_30',
+        'prz_hba1c_free',
+        'prz_home_20',
+        'prz_vitd_40',
+      ]);
+      const onlyOldStarter =
+        !prizesSnap.empty && prizesSnap.docs.every((d) => starterIds.has(d.id));
+
+      if (prizesSnap.empty || onlyOldStarter) {
+        if (onlyOldStarter) {
+          for (const oldDoc of prizesSnap.docs) {
+            batch.delete(doc(db, 'prizes', oldDoc.id));
+          }
+        }
         for (const p of DEFAULT_PRIZES) {
           batch.set(doc(db, 'prizes', p.id), {
             ...p,
@@ -1064,7 +1026,7 @@ export const apiClient = {
   },
 
   async upsertPrize(prize: Partial<Prize>): Promise<{ ok: boolean; message?: string }> {
-    const id = prize.id ? normalizeId(prize.id) : `prz_${Date.now().toString(36)}`;
+    const id = prize.id ? normalizeDocId(prize.id) : `prz_${Date.now().toString(36)}`;
     if (!id) return { ok: false, message: 'معرف الجائزة غير صالح.' };
 
     const payload = {
@@ -1072,7 +1034,7 @@ export const apiClient = {
       title: String(prize.title || '').trim().slice(0, 200),
       description: String(prize.description || '').trim().slice(0, 600),
       discountLabel: String(prize.discountLabel || 'هدية خاصة').trim().slice(0, 80),
-      category: (prize.category || 'discount') as PrizeCategory,
+      category: (prize.category || 'DISCOUNT') as PrizeCategory,
       validHours: Math.min(2160, Math.max(1, Number(prize.validHours || 48))),
       weight: Math.min(1000, Math.max(1, Number(prize.weight || 20))),
       stock: Math.min(100000, Math.max(1, Number(prize.stock || 50))),
@@ -1091,8 +1053,89 @@ export const apiClient = {
     }
   },
 
+  async bulkImportPrizes(
+    items: Array<{
+      title: string;
+      category: PrizeCategory;
+      discountLabel?: string;
+      description?: string;
+      validHours?: number;
+      weight?: number;
+      stock?: number;
+    }>
+  ): Promise<{ ok: boolean; count: number }> {
+    if (items.length === 0) return { ok: true, count: 0 };
+    try {
+      const now = Date.now().toString(36);
+      for (let i = 0; i < items.length; i += 350) {
+        const chunk = items.slice(i, i + 350);
+        const batch = writeBatch(db);
+        chunk.forEach((item, idx) => {
+          const id = `prz_${now}_${i + idx}`;
+          batch.set(doc(db, 'prizes', id), {
+            id,
+            title: String(item.title || '').trim().slice(0, 200),
+            description: String(item.description || item.title || '').trim().slice(0, 600),
+            discountLabel: String(item.discountLabel || 'هدية خاصة').trim().slice(0, 80),
+            category: item.category,
+            validHours: Math.min(2160, Math.max(1, Number(item.validHours || 72))),
+            weight: Math.min(1000, Math.max(1, Number(item.weight || 15))),
+            stock: Math.min(100000, Math.max(1, Number(item.stock || 50))),
+            usedCount: 0,
+            active: true,
+            updatedAt: serverTimestamp(),
+          });
+        });
+        await batch.commit();
+      }
+      return { ok: true, count: items.length };
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'prizes/bulk');
+    }
+  },
+
+  async seedFullPrizeCatalog(): Promise<{ ok: boolean; count: number }> {
+    try {
+      for (let i = 0; i < DEFAULT_PRIZES.length; i += 350) {
+        const chunk = DEFAULT_PRIZES.slice(i, i + 350);
+        const batch = writeBatch(db);
+        for (const p of chunk) {
+          batch.set(doc(db, 'prizes', p.id), {
+            ...p,
+            updatedAt: serverTimestamp(),
+          });
+        }
+        await batch.commit();
+      }
+      return { ok: true, count: DEFAULT_PRIZES.length };
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'prizes/seed');
+    }
+  },
+
+  async setPrizesActiveBatch(prizesList: Prize[], active: boolean): Promise<void> {
+    if (prizesList.length === 0) return;
+    try {
+      for (let i = 0; i < prizesList.length; i += 350) {
+        const chunk = prizesList.slice(i, i + 350);
+        const batch = writeBatch(db);
+        for (const p of chunk) {
+          const cleanId = normalizeDocId(p.id);
+          if (!cleanId) continue;
+          batch.update(doc(db, 'prizes', cleanId), {
+            active,
+            updatedAt: serverTimestamp(),
+          });
+        }
+        await batch.commit();
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, 'prizes/toggleBatch');
+    }
+  },
+
   async deletePrize(id: string): Promise<boolean> {
-    const cleanId = normalizeId(id);
+    const cleanId = normalizeDocId(id);
     if (!cleanId) return false;
     try {
       await deleteDoc(doc(db, 'prizes', cleanId));
@@ -1117,7 +1160,7 @@ export const apiClient = {
   },
 
   async upsertPriceItem(item: Partial<LabPriceItem>): Promise<{ ok: boolean; message?: string }> {
-    const id = item.id ? normalizeId(item.id) : `t-${Date.now().toString(36)}`;
+    const id = item.id ? normalizeDocId(item.id) : `t-${Date.now().toString(36)}`;
     if (!id) return { ok: false, message: 'معرف التحليل غير صالح.' };
 
     const docData: Record<string, unknown> = {
@@ -1168,7 +1211,7 @@ export const apiClient = {
         const chunk = modified.slice(i, i + 400);
         const batch = writeBatch(db);
         for (const item of chunk) {
-          const cleanId = normalizeId(item.id) || `t-${Date.now().toString(36)}`;
+          const cleanId = normalizeDocId(item.id) || `t-${Date.now().toString(36)}`;
           const docData: Record<string, unknown> = {
             id: cleanId,
             code: String(item.code || cleanId).slice(0, 64),
@@ -1192,7 +1235,7 @@ export const apiClient = {
   },
 
   async deletePriceItem(id: string): Promise<boolean> {
-    const cleanId = normalizeId(id);
+    const cleanId = normalizeDocId(id);
     if (!cleanId) return false;
     const isInitial = INITIAL_PRICES.some((p) => p.id === cleanId);
     try {
@@ -1254,14 +1297,14 @@ export const apiClient = {
       if (Array.isArray(parsed.prizes) && parsed.prizes.length > 0) {
         const batch = writeBatch(db);
         for (const p of parsed.prizes as Prize[]) {
-          const cleanId = normalizeId(String(p.id || `prz_${Date.now().toString(36)}`));
+          const cleanId = normalizeDocId(String(p.id || `prz_${Date.now().toString(36)}`));
           if (!cleanId) continue;
           batch.set(doc(db, 'prizes', cleanId), {
             id: cleanId,
             title: String(p.title || '').slice(0, 200),
             description: String(p.description || '').slice(0, 600),
             discountLabel: String(p.discountLabel || 'هدية خاصة').slice(0, 80),
-            category: (p.category || 'discount') as PrizeCategory,
+            category: (p.category || 'DISCOUNT') as PrizeCategory,
             validHours: Math.min(2160, Math.max(1, Number(p.validHours || 48))),
             weight: Math.min(1000, Math.max(1, Number(p.weight || 20))),
             stock: Math.min(100000, Math.max(1, Number(p.stock || 50))),
@@ -1319,7 +1362,7 @@ export const apiClient = {
       const incomingPrices = (parsed.prices || parsed.tests) as Array<Record<string, unknown>> | undefined;
       if (Array.isArray(incomingPrices) && incomingPrices.length > 0) {
         const normalizedPrices: LabPriceItem[] = incomingPrices.map((t, idx) => ({
-          id: normalizeId(String(t.id || `imp-${idx}`)) || `imp-${idx}`,
+          id: normalizeDocId(String(t.id || `imp-${idx}`)) || `imp-${idx}`,
           code: String(t.code || `RT-${idx + 1}`).slice(0, 64),
           nameAr: String(t.nameAr || t.name || 'تحليل طبي').slice(0, 200),
           nameEn: t.nameEn ? String(t.nameEn).slice(0, 200) : undefined,
