@@ -89,6 +89,7 @@
         "clientName": { "type": "string", "minLength": 1, "maxLength": 120 },
         "visitRef": { "type": "string", "maxLength": 64 },
         "branchName": { "type": "string", "maxLength": 160 },
+        "phoneHash": { "type": "string", "maxLength": 64 },
         "status": { "type": "string", "enum": ["pending", "opened", "redeemed", "expired"] },
         "createdAt": { "type": "string", "format": "date-time" },
         "expiresAt": { "type": "string", "minLength": 10, "maxLength": 64 },
@@ -147,6 +148,19 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "code", "nameAr", "category", "price", "active", "updatedAt"]
+    },
+    "PhoneLock": {
+      "title": "PhoneLock",
+      "description": "One-way SHA-256 hashed phone lock preventing duplicate box entries until active prize expires.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[a-f0-9]{64}$" },
+        "activeToken": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "expiresAt": { "type": "string", "minLength": 10, "maxLength": 64 },
+        "lockUntil": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "activeToken", "expiresAt", "lockUntil", "updatedAt"]
     }
   },
   "firestore": {
@@ -173,6 +187,10 @@
     "/prices/{priceId}": {
       "schema": { "$ref": "#/entities/LabPriceItem" },
       "description": "Admin-managed lab price overrides and custom tests."
+    },
+    "/phoneLocks/{phoneHash}": {
+      "schema": { "$ref": "#/entities/PhoneLock" },
+      "description": "Hashed phone deduplication locks enforcing one active prize per phone until expiry."
     }
   }
 }

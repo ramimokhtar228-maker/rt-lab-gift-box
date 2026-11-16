@@ -48,6 +48,7 @@ export interface GiftLink {
   clientPhone: string;
   visitRef: string;
   branchName: string;
+  phoneHash?: string | null;
   status: LinkStatus;
   createdAt: string;
   expiresAt: string;

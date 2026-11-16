@@ -16,6 +16,7 @@ import {
 import { buildDefaultPrizeTerms, DEFAULT_PRIZES } from '../data/defaultPrizes';
 import { INITIAL_PRICES } from '../data/initialPrices';
 import { db, handleFirestoreError, OperationType } from '../firebase';
+import { hashPhoneNumber, normalizeCanonicalPhone } from '../utils/phoneHash';
 import type {
   AdminDashboardData,
   BoxPublicResponse,
@@ -134,6 +135,7 @@ function docToGiftLink(id: string, data: Record<string, unknown>, clientPhone = 
     clientPhone,
     visitRef: String(data.visitRef || ''),
     branchName: String(data.branchName || ''),
+    phoneHash: data.phoneHash ? String(data.phoneHash) : null,
     status: isExpired ? 'expired' : rawStatus,
     createdAt: timestampToIso(data.createdAt),
     expiresAt,
@@ -394,7 +396,7 @@ export const apiClient = {
   async openBoxByToken(
     token: string,
     encodedData?: string | null
-  ): Promise<{ ok: boolean; box?: BoxPublicResponse; message?: string }> {
+  ): Promise<{ ok: boolean; alreadyClaimed?: boolean; box?: BoxPublicResponse; message?: string }> {
     const clean = normalizeId(token);
     if (!clean) {
       return { ok: false, message: 'رابط صندوق السعادة غير صحيح.' };
@@ -408,6 +410,38 @@ export const apiClient = {
       handleFirestoreError(error, OperationType.GET, `giftLinks/${clean}`);
     }
 
+    const checkActivePhoneLock = async (phoneHash: string): Promise<{
+      locked: boolean;
+      activeBox?: BoxPublicResponse;
+    }> => {
+      if (!phoneHash) return { locked: false };
+      try {
+        const lockSnap = await getDoc(doc(db, 'phoneLocks', phoneHash));
+        if (!lockSnap.exists()) return { locked: false };
+        const lockData = lockSnap.data();
+        const activeToken = normalizeId(String(lockData.activeToken || ''));
+        if (!activeToken) return { locked: false };
+        const activeSnap = await getDoc(doc(db, 'giftLinks', activeToken));
+        if (!activeSnap.exists()) return { locked: false };
+        const activeLink = docToGiftLink(activeSnap.id, activeSnap.data());
+        const expiresMs = new Date(activeLink.expiresAt).getTime();
+        const lockUntilMs =
+          lockData.lockUntil instanceof Timestamp ? lockData.lockUntil.toMillis() : expiresMs;
+        const activeUntilMs = Math.max(Number.isNaN(expiresMs) ? 0 : expiresMs, lockUntilMs);
+        if (
+          (activeLink.status === 'opened' || activeLink.status === 'redeemed') &&
+          Date.now() < activeUntilMs
+        ) {
+          return { locked: true, activeBox: toPublicBox(activeLink) };
+        }
+      } catch {
+        // ignore read error and allow fallback
+      }
+      return { locked: false };
+    };
+
+    const decoded = decodeBoxData(encodedData);
+
     if (existingSnap.exists()) {
       const existingLnk = docToGiftLink(existingSnap.id, existingSnap.data());
       if (existingLnk.status === 'opened' || existingLnk.status === 'redeemed') {
@@ -415,6 +449,21 @@ export const apiClient = {
       }
       if (existingLnk.status === 'expired') {
         return { ok: false, message: 'انتهت صلاحية هذا الرابط.' };
+      }
+
+      const phoneHash =
+        existingLnk.phoneHash || (decoded?.p ? await hashPhoneNumber(decoded.p) : '');
+      if (phoneHash) {
+        const lockCheck = await checkActivePhoneLock(phoneHash);
+        if (lockCheck.locked && lockCheck.activeBox && lockCheck.activeBox.token !== clean) {
+          return {
+            ok: true,
+            alreadyClaimed: true,
+            box: lockCheck.activeBox,
+            message:
+              'تم الدخول مسبقاً بنفس رقم الهاتف وحصلت على جائزتك السارية. يُسمح بالدخول والحصول على جائزة جديدة فقط بعد انتهاء مدة صلاحية الجائزة الأولى.',
+          };
+        }
       }
 
       const prizes = await fetchActivePrizes(encodedData);
@@ -426,21 +475,33 @@ export const apiClient = {
       const prizeCode = randomCode('RTWIN-', 6);
       const prizeTerms = (chosen.terms || buildDefaultPrizeTerms(chosen)).slice(0, 1000);
 
-      try {
-        await updateDoc(linkRef, {
-          status: 'opened',
-          openedAt,
+      const batch = writeBatch(db);
+      batch.update(linkRef, {
+        status: 'opened',
+        openedAt,
+        expiresAt,
+        prizeId: chosen.id.slice(0, 128),
+        prizeTitle: chosen.title.slice(0, 200),
+        prizeDescription: chosen.description.slice(0, 600),
+        prizeTerms,
+        prizeDiscountLabel: chosen.discountLabel.slice(0, 80),
+        prizeCategory: chosen.category.slice(0, 40),
+        prizeCode,
+        validHours,
+        updatedAt: serverTimestamp(),
+      });
+      if (phoneHash) {
+        batch.set(doc(db, 'phoneLocks', phoneHash), {
+          id: phoneHash,
+          activeToken: clean,
           expiresAt,
-          prizeId: chosen.id.slice(0, 128),
-          prizeTitle: chosen.title.slice(0, 200),
-          prizeDescription: chosen.description.slice(0, 600),
-          prizeTerms,
-          prizeDiscountLabel: chosen.discountLabel.slice(0, 80),
-          prizeCategory: chosen.category.slice(0, 40),
-          prizeCode,
-          validHours,
+          lockUntil: Timestamp.fromMillis(now + validHours * 3600_000),
           updatedAt: serverTimestamp(),
         });
+      }
+
+      try {
+        await batch.commit();
       } catch (error) {
         handleFirestoreError(error, OperationType.UPDATE, `giftLinks/${clean}`);
       }
@@ -463,9 +524,23 @@ export const apiClient = {
     }
 
     // Hydrate legacy ?d= link or demo link into Firestore atomically so Admin sees it immediately
-    const decoded = decodeBoxData(encodedData);
     if (!decoded && clean !== 'RTBOX-DEMO2026') {
       return { ok: false, message: 'رابط صندوق السعادة غير موجود.' };
+    }
+
+    const decodedPhone = (decoded?.p || '').trim().slice(0, 40);
+    const decodedPhoneHash = decodedPhone ? await hashPhoneNumber(decodedPhone) : '';
+    if (decodedPhoneHash) {
+      const lockCheck = await checkActivePhoneLock(decodedPhoneHash);
+      if (lockCheck.locked && lockCheck.activeBox) {
+        return {
+          ok: true,
+          alreadyClaimed: true,
+          box: lockCheck.activeBox,
+          message:
+            'تم الدخول مسبقاً بنفس رقم الهاتف وحصلت على جائزتك السارية. يُسمح بالدخول والحصول على جائزة جديدة فقط بعد انتهاء مدة صلاحية الجائزة الأولى.',
+        };
+      }
     }
 
     const prizes = await fetchActivePrizes(encodedData);
@@ -478,7 +553,7 @@ export const apiClient = {
     const prizeTerms = (chosen.terms || buildDefaultPrizeTerms(chosen)).slice(0, 1000);
 
     const clientName = (decoded?.n || 'عميلنا العزيز').trim().slice(0, 120);
-    const clientPhone = (decoded?.p || '').trim().slice(0, 40);
+    const clientPhone = normalizeCanonicalPhone(decodedPhone) || decodedPhone;
     const visitRef = (decoded?.v || `RT-${Math.floor(1000 + Math.random() * 9000)}`).slice(0, 64);
     const branchName = (decoded?.b || DEFAULT_LAB_PROFILE.branches[0]).slice(0, 160);
 
@@ -489,6 +564,7 @@ export const apiClient = {
       clientName,
       visitRef,
       branchName,
+      ...(decodedPhoneHash ? { phoneHash: decodedPhoneHash } : {}),
       status: 'opened',
       createdAt: serverTimestamp(),
       expiresAt,
@@ -512,6 +588,15 @@ export const apiClient = {
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
+    if (decodedPhoneHash) {
+      batch.set(doc(db, 'phoneLocks', decodedPhoneHash), {
+        id: decodedPhoneHash,
+        activeToken: clean,
+        expiresAt,
+        lockUntil: Timestamp.fromMillis(now + validHours * 3600_000),
+        updatedAt: serverTimestamp(),
+      });
+    }
 
     try {
       await batch.commit();
@@ -528,6 +613,7 @@ export const apiClient = {
         clientPhone,
         visitRef,
         branchName,
+        phoneHash: decodedPhoneHash || null,
         status: 'opened',
         createdAt: openedAt,
         expiresAt,
@@ -550,11 +636,46 @@ export const apiClient = {
     clientName: string;
     clientPhone: string;
     branchName?: string;
-  }): Promise<{ ok: boolean; box?: BoxPublicResponse; message?: string }> {
+  }): Promise<{ ok: boolean; alreadyClaimed?: boolean; box?: BoxPublicResponse; message?: string }> {
     const cleanName = payload.clientName.trim().slice(0, 120);
-    const cleanPhone = payload.clientPhone.trim().slice(0, 40);
-    if (!cleanName || cleanPhone.replace(/\D/g, '').length < 8) {
+    const canonicalPhone = normalizeCanonicalPhone(payload.clientPhone).slice(0, 40);
+    if (!cleanName || canonicalPhone.length < 8) {
       return { ok: false, message: 'يرجى إدخال الاسم ورقم الواتساب بشكل صحيح.' };
+    }
+
+    const phoneHash = await hashPhoneNumber(canonicalPhone);
+    if (phoneHash) {
+      try {
+        const lockSnap = await getDoc(doc(db, 'phoneLocks', phoneHash));
+        if (lockSnap.exists()) {
+          const lockData = lockSnap.data();
+          const activeToken = normalizeId(String(lockData.activeToken || ''));
+          if (activeToken) {
+            const activeSnap = await getDoc(doc(db, 'giftLinks', activeToken));
+            if (activeSnap.exists()) {
+              const activeLink = docToGiftLink(activeSnap.id, activeSnap.data(), canonicalPhone);
+              const expiresMs = new Date(activeLink.expiresAt).getTime();
+              const lockUntilMs =
+                lockData.lockUntil instanceof Timestamp ? lockData.lockUntil.toMillis() : expiresMs;
+              const activeUntilMs = Math.max(Number.isNaN(expiresMs) ? 0 : expiresMs, lockUntilMs);
+              if (
+                (activeLink.status === 'opened' || activeLink.status === 'redeemed') &&
+                Date.now() < activeUntilMs
+              ) {
+                return {
+                  ok: true,
+                  alreadyClaimed: true,
+                  box: toPublicBox(activeLink),
+                  message:
+                    'تم الدخول مسبقاً بنفس رقم الهاتف، وهذه هي جائزتك الأولى السارية حالياً. يُسمح بالدخول مرة أخرى بعد انتهاء مدة صلاحية هذه الجائزة.',
+                };
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('Phone lock lookup warning:', err);
+      }
     }
 
     const prizes = await fetchActivePrizes();
@@ -576,6 +697,7 @@ export const apiClient = {
       clientName: cleanName,
       visitRef,
       branchName,
+      ...(phoneHash ? { phoneHash } : {}),
       status: 'opened',
       createdAt: serverTimestamp(),
       expiresAt,
@@ -595,10 +717,19 @@ export const apiClient = {
       updatedAt: serverTimestamp(),
     });
     batch.set(doc(db, 'giftLinks', token, 'private', 'contact'), {
-      clientPhone: cleanPhone,
+      clientPhone: canonicalPhone,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
+    if (phoneHash) {
+      batch.set(doc(db, 'phoneLocks', phoneHash), {
+        id: phoneHash,
+        activeToken: token,
+        expiresAt,
+        lockUntil: Timestamp.fromMillis(now + validHours * 3600_000),
+        updatedAt: serverTimestamp(),
+      });
+    }
 
     try {
       await batch.commit();
@@ -612,9 +743,10 @@ export const apiClient = {
         id: token,
         token,
         clientName: cleanName,
-        clientPhone: cleanPhone,
+        clientPhone: canonicalPhone,
         visitRef,
         branchName,
+        phoneHash: phoneHash || null,
         status: 'opened',
         createdAt: openedAt,
         expiresAt,
@@ -952,6 +1084,8 @@ export const apiClient = {
     const visitRef = String(body.visitRef || `RT-${Math.floor(1000 + Math.random() * 9000)}`).slice(0, 64);
     const branchName = String(body.branchName || DEFAULT_LAB_PROFILE.branches[0]).slice(0, 160);
     const expiresAt = new Date(now + days * 24 * 3600_000).toISOString();
+    const canonicalPhone = normalizeCanonicalPhone(clientPhone);
+    const phoneHash = canonicalPhone.length >= 8 ? await hashPhoneNumber(canonicalPhone) : '';
 
     const batch = writeBatch(db);
     batch.set(doc(db, 'giftLinks', token), {
@@ -960,6 +1094,7 @@ export const apiClient = {
       clientName,
       visitRef,
       branchName,
+      ...(phoneHash ? { phoneHash } : {}),
       status: 'pending',
       createdAt: serverTimestamp(),
       expiresAt,
@@ -978,7 +1113,7 @@ export const apiClient = {
       updatedAt: serverTimestamp(),
     });
     batch.set(doc(db, 'giftLinks', token, 'private', 'contact'), {
-      clientPhone,
+      clientPhone: canonicalPhone || clientPhone,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
@@ -995,9 +1130,10 @@ export const apiClient = {
         id: token,
         token,
         clientName,
-        clientPhone,
+        clientPhone: canonicalPhone || clientPhone,
         visitRef,
         branchName,
+        phoneHash: phoneHash || null,
         status: 'pending',
         createdAt: new Date(now).toISOString(),
         expiresAt,
@@ -1040,7 +1176,32 @@ export const apiClient = {
   async deleteGiftLink(id: string): Promise<boolean> {
     const cleanId = normalizeId(id);
     if (!cleanId) return false;
+    let phoneHash = '';
+    try {
+      const linkSnap = await getDoc(doc(db, 'giftLinks', cleanId));
+      if (linkSnap.exists() && linkSnap.data().phoneHash) {
+        phoneHash = String(linkSnap.data().phoneHash);
+      } else {
+        const contactSnap = await getDoc(doc(db, 'giftLinks', cleanId, 'private', 'contact'));
+        if (contactSnap.exists() && contactSnap.data().clientPhone) {
+          phoneHash = await hashPhoneNumber(String(contactSnap.data().clientPhone));
+        }
+      }
+    } catch {
+      // continue deleting link
+    }
+
     const batch = writeBatch(db);
+    if (phoneHash) {
+      try {
+        const lockSnap = await getDoc(doc(db, 'phoneLocks', phoneHash));
+        if (lockSnap.exists() && lockSnap.data().activeToken === cleanId) {
+          batch.delete(doc(db, 'phoneLocks', phoneHash));
+        }
+      } catch {
+        // ignore
+      }
+    }
     batch.delete(doc(db, 'giftLinks', cleanId, 'private', 'contact'));
     batch.delete(doc(db, 'giftLinks', cleanId));
     try {

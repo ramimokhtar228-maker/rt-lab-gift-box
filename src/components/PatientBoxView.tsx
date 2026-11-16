@@ -20,6 +20,7 @@ import {
 import type { BoxPublicResponse, LabProfile } from '../types';
 import { PRIZE_CATEGORY_META, resolvePrizeTermsLines } from '../data/defaultPrizes';
 import { apiClient } from '../services/apiClient';
+import { normalizeCanonicalPhone } from '../utils/phoneHash';
 import {
   buildPatientClaimWhatsAppUrl,
   copyToClipboard,
@@ -54,6 +55,7 @@ export function PatientBoxView({
   const [loading, setLoading] = useState<boolean>(Boolean(token));
   const [opening, setOpening] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [alreadyClaimedMsg, setAlreadyClaimedMsg] = useState<string | null>(null);
   const [copiedCode, setCopiedCode] = useState(false);
   const [muted, setMuted] = useState(false);
   const [sealedImgError, setSealedImgError] = useState(false);
@@ -150,6 +152,7 @@ export function PatientBoxView({
     if (!box || opening) return;
     setOpening(true);
     setErrorMsg(null);
+    setAlreadyClaimedMsg(null);
     try {
       await new Promise((r) => setTimeout(r, 650));
       const data = await apiClient.openBoxByToken(box.token, encodedData);
@@ -157,6 +160,10 @@ export function PatientBoxView({
         setErrorMsg(data.message || 'تعذر فتح الصندوق حالياً.');
       } else {
         setBox(data.box);
+        if (data.alreadyClaimed && data.message) {
+          setAlreadyClaimedMsg(data.message);
+          onBoxAssigned(data.box.token);
+        }
         try {
           window.localStorage.setItem(
             `rt_hb_won_${data.box.token.toUpperCase()}`,
@@ -165,7 +172,9 @@ export function PatientBoxView({
         } catch {
           // ignore
         }
-        fireCelebration();
+        if (!data.alreadyClaimed) {
+          fireCelebration();
+        }
       }
     } catch {
       setErrorMsg('حدث خطأ أثناء فتح الصندوق.');
@@ -176,23 +185,28 @@ export function PatientBoxView({
 
   const handleSelfOpenSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selfName.trim() || selfPhone.replace(/\D/g, '').length < 8) {
+    const canonical = normalizeCanonicalPhone(selfPhone);
+    if (!selfName.trim() || canonical.length < 8) {
       setErrorMsg('يرجى إدخال الاسم ورقم الموبايل بشكل صحيح لاستلام الجائزة.');
       return;
     }
     setOpening(true);
     setErrorMsg(null);
+    setAlreadyClaimedMsg(null);
     try {
       await new Promise((r) => setTimeout(r, 650));
       const data = await apiClient.createAndOpenSelfBox({
         clientName: selfName.trim(),
-        clientPhone: selfPhone.trim(),
+        clientPhone: canonical,
         branchName: selfBranch || labProfile.branches[0],
       });
       if (!data.ok || !data.box) {
         setErrorMsg(data.message || 'تعذر فتح الصندوق.');
       } else {
         setBox(data.box);
+        if (data.alreadyClaimed && data.message) {
+          setAlreadyClaimedMsg(data.message);
+        }
         try {
           window.localStorage.setItem(
             `rt_hb_won_${data.box.token.toUpperCase()}`,
@@ -203,7 +217,9 @@ export function PatientBoxView({
         }
         setShowSelfForm(false);
         onBoxAssigned(data.box.token);
-        fireCelebration();
+        if (!data.alreadyClaimed) {
+          fireCelebration();
+        }
       }
     } catch {
       setErrorMsg('تعذر الاتصال بقاعدة البيانات، يرجى المحاولة مرة أخرى.');
@@ -238,6 +254,18 @@ export function PatientBoxView({
           ) : box && (box.status === 'opened' || box.status === 'redeemed') && box.prize ? (
             /* STATE 2: PRIZE REVEALED + LIVE COUNTDOWN + WHATSAPP */
             <div className="space-y-6">
+              {alreadyClaimedMsg ? (
+                <div className="flex items-start gap-3 rounded-2xl border border-amber-300 bg-amber-50 p-4 text-amber-950">
+                  <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-amber-700" />
+                  <div className="space-y-1 text-xs leading-relaxed">
+                    <p className="text-sm font-extrabold">
+                      تم الدخول بهذا الرقم من قبل — لا يمكن الحصول على جائزة جديدة الآن
+                    </p>
+                    <p className="text-amber-900">{alreadyClaimedMsg}</p>
+                  </div>
+                </div>
+              ) : null}
+
               <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
                 <span className="font-semibold text-teal-800">
                   تهانينا يا {box.clientName}
