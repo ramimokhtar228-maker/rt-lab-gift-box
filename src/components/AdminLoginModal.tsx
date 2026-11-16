@@ -171,6 +171,16 @@ export function AdminLoginModal({
             </svg>
             <span>{loading ? 'جاري تسجيل الدخول...' : 'تسجيل الدخول بحساب Google للإدارة'}</span>
           </button>
+
+          {typeof window !== 'undefined' && window.location.hostname.endsWith('.github.io') ? (
+            <a
+              href="https://ais-pre-uktgxyai3tq7v64jdhupar-928451427848.europe-west2.run.app/?view=admin"
+              className="flex min-h-[44px] w-full items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-xs font-extrabold text-slate-800 transition-colors hover:bg-slate-100"
+            >
+              <ExternalLink className="h-4 w-4 text-teal-700" />
+              <span>الدخول الفوري عبر رابط الإدارة المعتمد</span>
+            </a>
+          ) : null}
         </div>
       </div>
     </div>
