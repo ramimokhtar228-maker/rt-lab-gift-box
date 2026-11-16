@@ -13,7 +13,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import type { Prize, PrizeCategory } from '../types';
-import { PRIZE_CATEGORY_META } from '../data/defaultPrizes';
+import { DEFAULT_PRIZES, PRIZE_CATEGORY_META } from '../data/defaultPrizes';
 import { apiClient } from '../services/apiClient';
 
 interface AdminPrizesTabProps {
@@ -260,7 +260,7 @@ export function AdminPrizesTab({
             className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2 text-xs font-extrabold text-amber-900 hover:bg-amber-100 cursor-pointer whitespace-nowrap"
           >
             <RefreshCw className={`h-3.5 w-3.5 ${seedingCatalog ? 'animate-spin' : ''}`} />
-            <span>{seedingCatalog ? 'جاري التحميل...' : 'تفعيل قائمة RT LAB الكاملة (79 جائزة)'}</span>
+            <span>{seedingCatalog ? 'جاري التحميل...' : `تفعيل قائمة RT LAB الكاملة (${DEFAULT_PRIZES.length} جائزة)`}</span>
           </button>
           <button
             type="button"
