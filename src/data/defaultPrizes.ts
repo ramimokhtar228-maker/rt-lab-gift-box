@@ -103,11 +103,140 @@ const RAW_PRIZES: RawPrizeSeed[] = [
   { id: 'prz_surp_happy_family', title: 'جائزة العائلة السعيدة', discountLabel: 'العائلة السعيدة', category: 'SURPRISE', description: 'مفاجأة عائلية خاصة من د. رامي مختار ومعامل RT لكل أفراد أسرتك.', validHours: 96, weight: 12, stock: 50 },
 ];
 
+function detectFastingRequirement(title: string): string {
+  const t = title.toLowerCase();
+  if (
+    t.includes('fbs') ||
+    t.includes('cholesterol') ||
+    t.includes('triglycerides') ||
+    t.includes('hdl') ||
+    t.includes('ldl')
+  ) {
+    return 'التحضير الطبي: يتطلب صياماً من 8 إلى 12 ساعة (يُسمح بشرب الماء فقط) قبل سحب العينة.';
+  }
+  if (t.includes('iron') && !t.includes('ferritin')) {
+    return 'التحضير الطبي: يُفضل سحب العينة صباحاً مع صيام 8 ساعات للحصول على أدق قراءة للحديد.';
+  }
+  if (t.includes('فحص أساسي') || t.includes('فحص متقدم') || t.includes('فحص vip') || t.includes('باقة') || t.includes('فحص شامل')) {
+    return 'التحضير الطبي: قد تتطلب بعض تحاليل الباقة صيام 8–10 ساعات (ماء فقط) — سيتم تأكيد التحضير عند الحجز.';
+  }
+  if (
+    t.includes('cbc') ||
+    t.includes('esr') ||
+    t.includes('crp') ||
+    t.includes('hba1c') ||
+    t.includes('alt') ||
+    t.includes('ast') ||
+    t.includes('creatinine') ||
+    t.includes('urea') ||
+    t.includes('uric') ||
+    t.includes('calcium') ||
+    t.includes('vitamin') ||
+    t.includes('tsh') ||
+    t.includes('ferritin') ||
+    t.includes('albumin') ||
+    t.includes('total protein') ||
+    t.includes('bilirubin') ||
+    t.includes('ggt')
+  ) {
+    return 'التحضير الطبي: لا يشترط الصيام لهذا التحليل ويمكن إجراؤه في أي وقت خلال مواعيد العمل.';
+  }
+  return '';
+}
+
+export function buildDefaultPrizeTerms(input: {
+  title: string;
+  category: PrizeCategory;
+  validHours: number;
+}): string {
+  const lines: string[] = [];
+  const t = input.title;
+  const prep = detectFastingRequirement(t);
+
+  if (input.category === 'DISCOUNT' || input.category === 'discount') {
+    if (t.includes('الزيارة المنزلية')) {
+      lines.push('نطاق العرض: يسري الخصم على رسوم خدمة السحب المنزلي فقط، وتُحسب التحاليل بالأسعار المعتمدة.');
+    } else if (t.includes('من اختيارك')) {
+      lines.push('نطاق العرض: يُطبق الخصم على تحليل واحد فقط من اختيار المريض من قائمة المعمل.');
+    } else if (t.includes('باقة') || t.includes('فحص')) {
+      lines.push('نطاق العرض: يسري الخصم على إجمالي سعر الباقة المحددة فقط، ولا ينقسم على زيارات متعددة.');
+    } else if (t.includes('أسرة') || t.includes('صديق') || t.includes('عائلي')) {
+      lines.push('نطاق العرض: يخص المستفيد المذكور بالعنوان (فرد من الأسرة أو صديق)، ويُثبت اسمه عند الحجز عبر الواتساب.');
+    } else {
+      lines.push('نطاق العرض: يُطبق الخصم على التحاليل الطبية الأساسية والتخصصية المعتمدة داخل فروع المعمل.');
+    }
+    lines.push('لا يُجمع هذا الخصم مع أي عروض أو تعاقدات أو خصومات أخرى سارية إلا بموافقة إدارة المعمل.');
+  } else if (
+    input.category === 'FREE_SERVICE' ||
+    input.category === 'free_test' ||
+    input.category === 'package' ||
+    input.category === 'home_visit'
+  ) {
+    if (t.includes('زيارة منزلية') || t.includes('زيارتان') || t.includes('توصيل')) {
+      lines.push('نطاق الخدمة: تشمل الخدمة النطاق الجغرافي المعتمد لفروع المعمل وبالتنسيق المسبق لموعد الانتقال عبر الواتساب.');
+    } else if (t.includes('أسرة') || t.includes('أسرتك') || t.includes('صديق') || t.includes('شخص تختاره')) {
+      lines.push('نطاق الخدمة: الهدية قابلة للإهداء لشخص واحد من الأسرة أو صديق تختاره، ويُذكر اسمه ورقمه عند تأكيد الحجز.');
+    } else {
+      lines.push('نطاق الخدمة: تُجرى الخدمة مجاناً بالكامل (تحليل أو باقة فحص) بدون أي رسوم إضافية عند الحضور للفرع.');
+    }
+    lines.push('في حالة طلب سحب منزلي للتحليل المجاني قد تُطبق رسوم الانتقال المعتادة ما لم تشمل الجائزة زيارة منزلية مجانية.');
+  } else if (input.category === 'PHYSICAL_GIFT' || input.category === 'gift') {
+    if (t.includes('قسيمة')) {
+      lines.push('شروط القسيمة: تُخصم القيمة الكاملة للقسيمة لمرة واحدة من إجمالي فاتورة التحاليل ولا تُستبدل بنقود ولا يُرد فرق نقدي.');
+    } else if (t.includes('THE GOLDEN HAPPINESS BOX') || t.includes('بوكس هدايا')) {
+      lines.push('شروط التسليم: تُسلّم الجائزة المادية شخصياً بالفرع أو تُرتب مع الإدارة بعد مطابقة كود الفوز ورقم الهاتف المسجل.');
+    } else {
+      lines.push('شروط الاستلام: تُسلّم الهدية العينية عند الحضور للفرع أو مع فريق السحب المنزلي بشرط تأكيد الكود مسبقاً.');
+    }
+  } else {
+    if (t.includes('سحب') || t.includes('تذكرة')) {
+      lines.push('آلية السحب: يُسجل كود الجائزة واسم العميل تلقائياً في السحب الشهري المعلن في معامل RT وتُعلن النتائج على القنوات الرسمية.');
+    } else if (t.includes('جروب الفحص الشامل')) {
+      lines.push('شرط الأهلية: مخصصة لأعضاء جروب الفحص الشامل لمعامل RT وتُفعل فور إرسال الكود لواتساب المعمل.');
+    } else if (t.includes('مشاركة')) {
+      lines.push('آلية المشاركة: تتيح لك منح نفس الميزة لشخص واحد تختاره عند حجز نفس الموعد أو التنسيق بالواتساب.');
+    } else {
+      lines.push('آلية التفعيل: تواصل عبر زر الواتساب لإثبات الكود وتحديد الموعد أو الاستفسار عن تفاصيل المفاجأة الخاصة بك.');
+    }
+  }
+
+  if (prep) lines.push(prep);
+  lines.push(`صلاحية الكود: سارية لمدة ${input.validHours} ساعة من لحظة فتح الصندوق، وتُستخدم لمرة واحدة فقط.`);
+  lines.push('شرط الصرف: يلزم إرسال رسالة الكود لواتساب المعمل وتقديمه للاستقبال قبل انتهاء العداد الزمني.');
+
+  return lines.join('\n');
+}
+
 export const DEFAULT_PRIZES: Prize[] = RAW_PRIZES.map((p) => ({
   ...p,
+  terms: buildDefaultPrizeTerms(p),
   usedCount: 0,
   active: true,
 }));
+
+export function resolvePrizeTermsLines(input: {
+  prizeId?: string | null;
+  title: string;
+  category: PrizeCategory;
+  terms?: string | null;
+  validHours: number;
+}): string[] {
+  const direct = (input.terms || '').trim();
+  if (direct) {
+    return direct
+      .split('\n')
+      .map((line) => line.trim().replace(/^[-•*]\s*/, ''))
+      .filter(Boolean);
+  }
+  const matched = DEFAULT_PRIZES.find(
+    (p) => (input.prizeId && p.id === input.prizeId) || p.title === input.title
+  );
+  const raw = matched?.terms || buildDefaultPrizeTerms(input);
+  return raw
+    .split('\n')
+    .map((line) => line.trim().replace(/^[-•*]\s*/, ''))
+    .filter(Boolean);
+}
 
 export const PRIZE_CATEGORY_META: Record<
   string,

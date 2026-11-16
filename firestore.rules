@@ -117,6 +117,7 @@ service cloud.firestore {
         'id',
         'title',
         'description',
+        'terms',
         'discountLabel',
         'category',
         'validHours',
@@ -129,6 +130,7 @@ service cloud.firestore {
       isValidId(data.id) &&
       data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
       data.description is string && data.description.size() <= 600 &&
+      isOptStr(data, 'terms', 1000) &&
       data.discountLabel is string && data.discountLabel.size() >= 1 && data.discountLabel.size() <= 80 &&
       data.category in ['DISCOUNT', 'FREE_SERVICE', 'PHYSICAL_GIFT', 'SURPRISE', 'discount', 'free_test', 'package', 'home_visit', 'gift'] &&
       data.validHours is number && data.validHours >= 1 && data.validHours <= 2160 &&
@@ -168,6 +170,7 @@ service cloud.firestore {
         'prizeId',
         'prizeTitle',
         'prizeDescription',
+        'prizeTerms',
         'prizeDiscountLabel',
         'prizeCategory',
         'prizeCode',
@@ -190,6 +193,7 @@ service cloud.firestore {
       isOptStr(data, 'prizeId', 128) &&
       isOptStr(data, 'prizeTitle', 200) &&
       isOptStr(data, 'prizeDescription', 600) &&
+      isOptStr(data, 'prizeTerms', 1000) &&
       isOptStr(data, 'prizeDiscountLabel', 80) &&
       isOptStr(data, 'prizeCategory', 40) &&
       isOptStr(data, 'prizeCode', 64) &&
@@ -295,6 +299,7 @@ service cloud.firestore {
               'prizeId',
               'prizeTitle',
               'prizeDescription',
+              'prizeTerms',
               'prizeDiscountLabel',
               'prizeCategory',
               'prizeCode',

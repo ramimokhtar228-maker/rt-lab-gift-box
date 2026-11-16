@@ -52,6 +52,7 @@
         "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "title": { "type": "string", "minLength": 1, "maxLength": 200 },
         "description": { "type": "string", "maxLength": 600 },
+        "terms": { "type": "string", "maxLength": 1000 },
         "discountLabel": { "type": "string", "minLength": 1, "maxLength": 80 },
         "category": {
           "type": "string",
@@ -99,6 +100,7 @@
         "prizeId": { "type": "string", "maxLength": 128 },
         "prizeTitle": { "type": "string", "maxLength": 200 },
         "prizeDescription": { "type": "string", "maxLength": 600 },
+        "prizeTerms": { "type": "string", "maxLength": 1000 },
         "prizeDiscountLabel": { "type": "string", "maxLength": 80 },
         "prizeCategory": { "type": "string", "maxLength": 40 },
         "prizeCode": { "type": "string", "maxLength": 64 },

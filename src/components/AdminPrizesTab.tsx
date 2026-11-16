@@ -25,6 +25,7 @@ interface AdminPrizesTabProps {
 const EMPTY_PRIZE: Partial<Prize> = {
   title: '',
   description: '',
+  terms: '',
   discountLabel: 'خصم 25%',
   category: 'DISCOUNT',
   validHours: 72,
@@ -401,13 +402,25 @@ export function AdminPrizesTab({
               />
             </div>
             <div className="sm:col-span-2">
-              <label className="mb-1 block text-xs font-bold text-slate-700">وصف الجائزة وشروطها</label>
+              <label className="mb-1 block text-xs font-bold text-slate-700">وصف الجائزة المختصر</label>
               <textarea
                 rows={2}
                 value={editing.description || ''}
                 onChange={(e) => setEditing({ ...editing, description: e.target.value })}
-                placeholder="تفاصيل الاستفادة من الجائزة..."
+                placeholder="ملخص واضح للجائزة يظهر للعميل..."
                 className="w-full rounded-xl border border-slate-300 px-3.5 py-2 text-sm focus:border-teal-700 focus:outline-none"
+              />
+            </div>
+            <div className="sm:col-span-2">
+              <label className="mb-1 block text-xs font-bold text-slate-700">
+                الشروط والضوابط الكاملة (تظهر للمريض فور الضغط على البوكس)
+              </label>
+              <textarea
+                rows={4}
+                value={editing.terms || ''}
+                onChange={(e) => setEditing({ ...editing, terms: e.target.value })}
+                placeholder="اكتب كل شرط في سطر (مثال: نطاق العرض، الصيام المطلوب، مدة الصلاحية، طريقة الصرف بالمعمل). إذا تركته فارغاً سيتم توليد الشروط المناسبة تلقائياً."
+                className="w-full rounded-xl border border-slate-300 px-3.5 py-2 text-xs leading-relaxed focus:border-teal-700 focus:outline-none"
               />
             </div>
             <div>
@@ -584,6 +597,12 @@ export function AdminPrizesTab({
                 </div>
                 <h3 className="text-base font-extrabold text-slate-900">{p.title}</h3>
                 <p className="text-xs leading-relaxed text-slate-600">{p.description}</p>
+                {p.terms ? (
+                  <div className="rounded-xl border border-slate-100 bg-slate-50/80 p-2.5 text-[11px] leading-relaxed text-slate-600">
+                    <span className="font-extrabold text-slate-700">الشروط المعروضة للعميل: </span>
+                    <span className="line-clamp-2 whitespace-pre-line">{p.terms}</span>
+                  </div>
+                ) : null}
               </div>
 
               <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-3 text-xs text-slate-500">

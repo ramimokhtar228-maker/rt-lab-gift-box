@@ -31,6 +31,7 @@ export interface Prize {
   id: string;
   title: string;
   description: string;
+  terms?: string;
   discountLabel: string;
   category: PrizeCategory;
   validHours: number;
@@ -58,6 +59,7 @@ export interface GiftLink {
   prizeId: string | null;
   prizeTitle: string | null;
   prizeDescription: string | null;
+  prizeTerms?: string | null;
   prizeDiscountLabel: string | null;
   prizeCategory: PrizeCategory | null;
   prizeCode: string | null;
@@ -101,6 +103,7 @@ export interface BoxPublicResponse {
   prize: {
     title: string;
     description: string;
+    terms?: string;
     discountLabel: string;
     category: PrizeCategory;
     prizeCode: string;

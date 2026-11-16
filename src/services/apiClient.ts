@@ -13,7 +13,7 @@ import {
   where,
   writeBatch,
 } from 'firebase/firestore';
-import { DEFAULT_PRIZES } from '../data/defaultPrizes';
+import { buildDefaultPrizeTerms, DEFAULT_PRIZES } from '../data/defaultPrizes';
 import { INITIAL_PRICES } from '../data/initialPrices';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import type {
@@ -145,6 +145,7 @@ function docToGiftLink(id: string, data: Record<string, unknown>, clientPhone = 
     prizeId: data.prizeId ? String(data.prizeId) : null,
     prizeTitle: data.prizeTitle ? String(data.prizeTitle) : null,
     prizeDescription: data.prizeDescription ? String(data.prizeDescription) : null,
+    prizeTerms: data.prizeTerms ? String(data.prizeTerms) : null,
     prizeDiscountLabel: data.prizeDiscountLabel ? String(data.prizeDiscountLabel) : null,
     prizeCategory: (data.prizeCategory as PrizeCategory) || null,
     prizeCode: data.prizeCode ? String(data.prizeCode) : null,
@@ -169,6 +170,7 @@ function toPublicBox(lnk: GiftLink): BoxPublicResponse {
       ? {
           title: lnk.prizeTitle,
           description: lnk.prizeDescription || '',
+          terms: lnk.prizeTerms || undefined,
           discountLabel: lnk.prizeDiscountLabel || 'هدية خاصة',
           category: (lnk.prizeCategory || 'discount') as PrizeCategory,
           prizeCode: lnk.prizeCode || '',
@@ -197,13 +199,21 @@ async function fetchActivePrizes(encodedData?: string | null): Promise<Prize[]> 
     if (!snap.empty) {
       return snap.docs.map((d) => {
         const data = d.data();
+        const title = String(data.title || '');
+        const category = (data.category as PrizeCategory) || 'DISCOUNT';
+        const validHours = Number(data.validHours || 48);
+        const defaultMatch = DEFAULT_PRIZES.find((p) => p.id === d.id || p.title === title);
+        const terms = data.terms
+          ? String(data.terms)
+          : defaultMatch?.terms || buildDefaultPrizeTerms({ title, category, validHours });
         return {
           id: d.id,
-          title: String(data.title || ''),
+          title,
           description: String(data.description || ''),
+          terms,
           discountLabel: String(data.discountLabel || 'هدية خاصة'),
-          category: (data.category as PrizeCategory) || 'discount',
-          validHours: Number(data.validHours || 48),
+          category,
+          validHours,
           weight: Number(data.weight || 20),
           stock: Number(data.stock || 50),
           usedCount: Number(data.usedCount || 0),
@@ -221,6 +231,11 @@ async function fetchActivePrizes(encodedData?: string | null): Promise<Prize[]> 
       id: `prz_url_${idx}`,
       title,
       description: `${title} — جائزة صالحة للاستخدام خلال الوقت المحدد.`,
+      terms: buildDefaultPrizeTerms({
+        title,
+        category: 'DISCOUNT',
+        validHours: Math.max(1, Number(validHours) || 48),
+      }),
       discountLabel,
       category: 'discount',
       validHours: Math.max(1, Number(validHours) || 48),
@@ -409,6 +424,7 @@ export const apiClient = {
       const openedAt = new Date(now).toISOString();
       const expiresAt = new Date(now + validHours * 3600_000).toISOString();
       const prizeCode = randomCode('RTWIN-', 6);
+      const prizeTerms = (chosen.terms || buildDefaultPrizeTerms(chosen)).slice(0, 1000);
 
       try {
         await updateDoc(linkRef, {
@@ -418,6 +434,7 @@ export const apiClient = {
           prizeId: chosen.id.slice(0, 128),
           prizeTitle: chosen.title.slice(0, 200),
           prizeDescription: chosen.description.slice(0, 600),
+          prizeTerms,
           prizeDiscountLabel: chosen.discountLabel.slice(0, 80),
           prizeCategory: chosen.category.slice(0, 40),
           prizeCode,
@@ -436,6 +453,7 @@ export const apiClient = {
         prizeId: chosen.id,
         prizeTitle: chosen.title,
         prizeDescription: chosen.description,
+        prizeTerms,
         prizeDiscountLabel: chosen.discountLabel,
         prizeCategory: chosen.category,
         prizeCode,
@@ -457,6 +475,7 @@ export const apiClient = {
     const openedAt = new Date(now).toISOString();
     const expiresAt = new Date(now + validHours * 3600_000).toISOString();
     const prizeCode = randomCode('RTWIN-', 6);
+    const prizeTerms = (chosen.terms || buildDefaultPrizeTerms(chosen)).slice(0, 1000);
 
     const clientName = (decoded?.n || 'عميلنا العزيز').trim().slice(0, 120);
     const clientPhone = (decoded?.p || '').trim().slice(0, 40);
@@ -481,6 +500,7 @@ export const apiClient = {
       prizeId: chosen.id.slice(0, 128),
       prizeTitle: chosen.title.slice(0, 200),
       prizeDescription: chosen.description.slice(0, 600),
+      prizeTerms,
       prizeDiscountLabel: chosen.discountLabel.slice(0, 80),
       prizeCategory: chosen.category.slice(0, 40),
       prizeCode,
@@ -517,6 +537,7 @@ export const apiClient = {
         prizeId: chosen.id,
         prizeTitle: chosen.title,
         prizeDescription: chosen.description,
+        prizeTerms,
         prizeDiscountLabel: chosen.discountLabel,
         prizeCategory: chosen.category,
         prizeCode,
@@ -546,6 +567,7 @@ export const apiClient = {
     const prizeCode = randomCode('RTWIN-', 6);
     const visitRef = `RT-${Math.floor(1000 + Math.random() * 9000)}`;
     const branchName = (payload.branchName || DEFAULT_LAB_PROFILE.branches[0]).slice(0, 160);
+    const prizeTerms = (chosen.terms || buildDefaultPrizeTerms(chosen)).slice(0, 1000);
 
     const batch = writeBatch(db);
     batch.set(doc(db, 'giftLinks', token), {
@@ -565,6 +587,7 @@ export const apiClient = {
       prizeId: chosen.id.slice(0, 128),
       prizeTitle: chosen.title.slice(0, 200),
       prizeDescription: chosen.description.slice(0, 600),
+      prizeTerms,
       prizeDiscountLabel: chosen.discountLabel.slice(0, 80),
       prizeCategory: chosen.category.slice(0, 40),
       prizeCode,
@@ -601,6 +624,7 @@ export const apiClient = {
         prizeId: chosen.id,
         prizeTitle: chosen.title,
         prizeDescription: chosen.description,
+        prizeTerms,
         prizeDiscountLabel: chosen.discountLabel,
         prizeCategory: chosen.category,
         prizeCode,
@@ -653,6 +677,37 @@ export const apiClient = {
           });
         }
         hasWrites = true;
+      } else {
+        // Backfill missing terms on already-seeded prizes & add newly added default SURPRISE prizes if absent
+        const existingIds = new Set(prizesSnap.docs.map((d) => d.id));
+        for (const d of prizesSnap.docs) {
+          const data = d.data();
+          if (!data.terms) {
+            const title = String(data.title || '');
+            const category = (data.category as PrizeCategory) || 'DISCOUNT';
+            const validHours = Number(data.validHours || 48);
+            const matched = DEFAULT_PRIZES.find((p) => p.id === d.id || p.title === title);
+            const terms = matched?.terms || buildDefaultPrizeTerms({ title, category, validHours });
+            batch.update(doc(db, 'prizes', d.id), {
+              terms: terms.slice(0, 1000),
+              updatedAt: serverTimestamp(),
+            });
+            hasWrites = true;
+          }
+        }
+        const newlyAddedIds = ['prz_surp_lucky_rt', 'prz_surp_dr_rami', 'prz_surp_monthly_draw'];
+        if (prizesSnap.size >= 70 && newlyAddedIds.every((nid) => !existingIds.has(nid))) {
+          for (const nid of newlyAddedIds) {
+            const p = DEFAULT_PRIZES.find((item) => item.id === nid);
+            if (p) {
+              batch.set(doc(db, 'prizes', p.id), {
+                ...p,
+                updatedAt: serverTimestamp(),
+              });
+              hasWrites = true;
+            }
+          }
+        }
       }
 
       if (hasWrites) {
@@ -774,13 +829,20 @@ export const apiClient = {
         if (!snap.empty) {
           prizes = snap.docs.map((d) => {
             const data = d.data();
+            const title = String(data.title || '');
+            const category = (data.category as PrizeCategory) || 'DISCOUNT';
+            const validHours = Number(data.validHours || 48);
+            const matched = DEFAULT_PRIZES.find((p) => p.id === d.id || p.title === title);
             return {
               id: d.id,
-              title: String(data.title || ''),
+              title,
               description: String(data.description || ''),
+              terms: data.terms
+                ? String(data.terms)
+                : matched?.terms || buildDefaultPrizeTerms({ title, category, validHours }),
               discountLabel: String(data.discountLabel || 'هدية خاصة'),
-              category: (data.category as PrizeCategory) || 'discount',
-              validHours: Number(data.validHours || 48),
+              category,
+              validHours,
               weight: Number(data.weight || 20),
               stock: Number(data.stock || 50),
               usedCount: Number(data.usedCount || 0),
@@ -1029,13 +1091,20 @@ export const apiClient = {
     const id = prize.id ? normalizeDocId(prize.id) : `prz_${Date.now().toString(36)}`;
     if (!id) return { ok: false, message: 'معرف الجائزة غير صالح.' };
 
+    const title = String(prize.title || '').trim().slice(0, 200);
+    const category = (prize.category || 'DISCOUNT') as PrizeCategory;
+    const validHours = Math.min(2160, Math.max(1, Number(prize.validHours || 48)));
+    const termsRaw = String(prize.terms || '').trim();
+    const terms = (termsRaw || buildDefaultPrizeTerms({ title, category, validHours })).slice(0, 1000);
+
     const payload = {
       id,
-      title: String(prize.title || '').trim().slice(0, 200),
+      title,
       description: String(prize.description || '').trim().slice(0, 600),
+      terms,
       discountLabel: String(prize.discountLabel || 'هدية خاصة').trim().slice(0, 80),
-      category: (prize.category || 'DISCOUNT') as PrizeCategory,
-      validHours: Math.min(2160, Math.max(1, Number(prize.validHours || 48))),
+      category,
+      validHours,
       weight: Math.min(1000, Math.max(1, Number(prize.weight || 20))),
       stock: Math.min(100000, Math.max(1, Number(prize.stock || 50))),
       usedCount: Math.min(100000, Math.max(0, Number(prize.usedCount || 0))),
@@ -1059,6 +1128,7 @@ export const apiClient = {
       category: PrizeCategory;
       discountLabel?: string;
       description?: string;
+      terms?: string;
       validHours?: number;
       weight?: number;
       stock?: number;
@@ -1072,13 +1142,20 @@ export const apiClient = {
         const batch = writeBatch(db);
         chunk.forEach((item, idx) => {
           const id = `prz_${now}_${i + idx}`;
+          const validHours = Math.min(2160, Math.max(1, Number(item.validHours || 72)));
+          const terms = String(
+            item.terms || buildDefaultPrizeTerms({ title: item.title, category: item.category, validHours })
+          )
+            .trim()
+            .slice(0, 1000);
           batch.set(doc(db, 'prizes', id), {
             id,
             title: String(item.title || '').trim().slice(0, 200),
             description: String(item.description || item.title || '').trim().slice(0, 600),
+            terms,
             discountLabel: String(item.discountLabel || 'هدية خاصة').trim().slice(0, 80),
             category: item.category,
-            validHours: Math.min(2160, Math.max(1, Number(item.validHours || 72))),
+            validHours,
             weight: Math.min(1000, Math.max(1, Number(item.weight || 15))),
             stock: Math.min(100000, Math.max(1, Number(item.stock || 50))),
             usedCount: 0,
@@ -1303,6 +1380,7 @@ export const apiClient = {
             id: cleanId,
             title: String(p.title || '').slice(0, 200),
             description: String(p.description || '').slice(0, 600),
+            terms: String(p.terms || '').slice(0, 1000),
             discountLabel: String(p.discountLabel || 'هدية خاصة').slice(0, 80),
             category: (p.category || 'DISCOUNT') as PrizeCategory,
             validHours: Math.min(2160, Math.max(1, Number(p.validHours || 48))),
@@ -1342,6 +1420,7 @@ export const apiClient = {
               prizeId: lnk.prizeId || null,
               prizeTitle: lnk.prizeTitle || null,
               prizeDescription: lnk.prizeDescription || null,
+              prizeTerms: lnk.prizeTerms ? String(lnk.prizeTerms).slice(0, 1000) : null,
               prizeDiscountLabel: lnk.prizeDiscountLabel || null,
               prizeCategory: lnk.prizeCategory || null,
               prizeCode: lnk.prizeCode || null,

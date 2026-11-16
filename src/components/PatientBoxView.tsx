@@ -4,8 +4,10 @@ import {
   AlertCircle,
   CalendarClock,
   Check,
+  CheckCircle2,
   Clock,
   Copy,
+  FileText,
   Gift,
   MapPin,
   MessageCircle,
@@ -16,6 +18,7 @@ import {
   VolumeX,
 } from 'lucide-react';
 import type { BoxPublicResponse, LabProfile } from '../types';
+import { PRIZE_CATEGORY_META, resolvePrizeTermsLines } from '../data/defaultPrizes';
 import { apiClient } from '../services/apiClient';
 import {
   buildPatientClaimWhatsAppUrl,
@@ -264,17 +267,27 @@ export function PatientBoxView({
                   )}
                 </div>
 
-                <div className="flex-1 space-y-2 text-center sm:text-right">
-                  <div className="flex items-center justify-center gap-2 text-xs font-bold text-amber-700 sm:justify-start">
-                    <Sparkles className="h-4 w-4" />
-                    <span>{box.prize.discountLabel}</span>
-                    <span aria-hidden="true">·</span>
-                    <span>
+                <div className="flex-1 space-y-2.5 text-center sm:text-right">
+                  <div className="flex flex-wrap items-center justify-center gap-2 sm:justify-start">
+                    <span
+                      className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-[11px] font-bold ${
+                        (PRIZE_CATEGORY_META[box.prize.category] || PRIZE_CATEGORY_META.DISCOUNT).badgeClass
+                      }`}
+                    >
+                      <Sparkles className="h-3 w-3" />
+                      <span>
+                        {(PRIZE_CATEGORY_META[box.prize.category] || PRIZE_CATEGORY_META.DISCOUNT).shortLabel}
+                      </span>
+                    </span>
+                    <span className="inline-flex items-center gap-1 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] font-extrabold text-amber-800">
+                      {box.prize.discountLabel}
+                    </span>
+                    <span className="text-xs font-bold text-slate-600">
                       {box.status === 'redeemed'
-                        ? 'تم الصرف بالمعمل'
+                        ? '· تم الصرف بالمعمل'
                         : isExpired
-                          ? 'انتهت المدة المحددة'
-                          : 'جاهز للاستخدام'}
+                          ? '· انتهت المدة المحددة'
+                          : '· سارية وجاهزة للاستخدام'}
                     </span>
                   </div>
                   <h1 className="text-2xl font-extrabold leading-snug text-slate-900">
@@ -283,6 +296,50 @@ export function PatientBoxView({
                   <p className="text-sm leading-relaxed text-slate-600">
                     {box.prize.description}
                   </p>
+                </div>
+              </div>
+
+              {/* Official Prize Terms & Conditions Card for Full Credibility */}
+              <div className="rounded-2xl border border-slate-200 bg-slate-50/90 p-4 sm:p-5">
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2 border-b border-slate-200/80 pb-2.5">
+                  <h2 className="flex items-center gap-2 text-sm font-extrabold text-slate-900">
+                    <FileText className="h-4 w-4 text-teal-700" />
+                    <span>شروط الجائزة وضوابط الاستفادة الكاملة</span>
+                  </h2>
+                  <span className="text-[11px] font-bold text-teal-800">
+                    صلاحية العرض: {box.prize.validHours} ساعة من الفتح
+                  </span>
+                </div>
+
+                <ul className="space-y-2 text-xs leading-relaxed text-slate-700">
+                  {resolvePrizeTermsLines({
+                    title: box.prize.title,
+                    category: box.prize.category,
+                    terms: box.prize.terms,
+                    validHours: box.prize.validHours,
+                  }).map((term, idx) => (
+                    <li key={idx} className="flex items-start gap-2">
+                      <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-teal-700" />
+                      <span>{term}</span>
+                    </li>
+                  ))}
+                </ul>
+
+                <div className="mt-3.5 grid grid-cols-2 gap-2 border-t border-slate-200/80 pt-3 text-[11px] text-slate-600 sm:grid-cols-3">
+                  <div>
+                    <span className="block text-slate-400">المستفيد المسجل</span>
+                    <span className="font-bold text-slate-800">{box.clientName}</span>
+                  </div>
+                  <div>
+                    <span className="block text-slate-400">تاريخ ووقت الفتح</span>
+                    <span className="font-bold text-slate-800">{formatArabicDate(box.openedAt)}</span>
+                  </div>
+                  <div className="col-span-2 sm:col-span-1">
+                    <span className="block text-slate-400">الفرع / المرجع</span>
+                    <span className="font-bold text-slate-800">
+                      {box.branchName || labProfile.branches[0]} ({box.visitRef})
+                    </span>
+                  </div>
                 </div>
               </div>
 
@@ -442,7 +499,7 @@ export function PatientBoxView({
                 صندوق السعادة بانتظارك
               </h1>
               <p className="mb-6 max-w-md text-sm leading-relaxed text-slate-600">
-                افتح الصندوق الآن لتكشف عن هديتك المضمونة — خصم خاص أو تحليل مجاني متاح لوقت محدد.
+                اضغط على الصندوق الآن لتكشف هديتك المضمونة من معامل RT وتظهر لك الجائزة بالكامل مع شروطها التفصيلية وكود التفعيل ومدة الصلاحية.
               </p>
 
               <button
