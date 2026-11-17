@@ -113,6 +113,18 @@ function AppContent() {
         }
       })
       .catch(() => undefined);
+
+    const unsubPublic = apiClient.subscribePublicProfile((updatedProfile, updatedBase) => {
+      setLabProfile((prev) => ({
+        ...prev,
+        ...updatedProfile,
+      }));
+      if (updatedBase) {
+        setServerShareBaseUrl(updatedBase);
+      }
+    });
+
+    return () => unsubPublic();
   }, [initial.encodedData]);
 
   const publicShareBaseUrl = resolvePublicBaseUrl(serverShareBaseUrl, labProfile.shareBaseUrl);

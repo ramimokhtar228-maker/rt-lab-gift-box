@@ -18,6 +18,7 @@ import { buildDefaultPrizeTerms, DEFAULT_PRIZES } from '../data/defaultPrizes';
 import { INITIAL_PRICES } from '../data/initialPrices';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import { hashPhoneNumber, normalizeCanonicalPhone } from '../utils/phoneHash';
+import { formatWhatsAppPhone } from '../utils/whatsapp';
 import type {
   AdminDashboardData,
   BoxPublicResponse,
@@ -100,6 +101,74 @@ function normalizeDocId(raw: string): string {
     .trim()
     .replace(/[^a-zA-Z0-9_-]/g, '')
     .slice(0, 128);
+}
+
+const DELETED_TOKENS_STORAGE_KEY = 'rt_hb_deleted_tokens';
+
+function getDeletedTokensSet(): Set<string> {
+  if (typeof window === 'undefined' || !window.localStorage) return new Set();
+  try {
+    const raw = window.localStorage.getItem(DELETED_TOKENS_STORAGE_KEY);
+    if (!raw) return new Set();
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return new Set();
+    return new Set(arr.map((t) => normalizeId(String(t))).filter(Boolean));
+  } catch {
+    return new Set();
+  }
+}
+
+function addDeletedTokensLocally(tokens: string[]): void {
+  if (typeof window === 'undefined' || !window.localStorage) return;
+  const cleanList = tokens.map((t) => normalizeId(t)).filter(Boolean);
+  if (cleanList.length === 0) return;
+  try {
+    const set = getDeletedTokensSet();
+    cleanList.forEach((t) => set.add(t));
+    window.localStorage.setItem(DELETED_TOKENS_STORAGE_KEY, JSON.stringify(Array.from(set).slice(-500)));
+
+    for (const tok of cleanList) {
+      window.localStorage.removeItem(`rt_hb_won_${tok}`);
+    }
+
+    // Scrub deleted tokens from any legacy/backup caches stored in localStorage
+    const deletedSet = new Set(cleanList);
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const key = window.localStorage.key(i);
+      if (!key || key === DELETED_TOKENS_STORAGE_KEY) continue;
+      if (key.includes('giftLinks') || key.includes('happiness')) {
+        const raw = window.localStorage.getItem(key);
+        if (!raw) continue;
+        try {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) {
+            const filtered = parsed.filter(
+              (item) => !deletedSet.has(normalizeId(String(item?.token || item?.id || '')))
+            );
+            if (filtered.length !== parsed.length) {
+              window.localStorage.setItem(key, JSON.stringify(filtered));
+            }
+          } else if (parsed && typeof parsed === 'object') {
+            const obj = parsed as Record<string, unknown>;
+            if (Array.isArray(obj.giftLinks)) {
+              const filtered = (obj.giftLinks as Array<Record<string, unknown>>).filter(
+                (item) => !deletedSet.has(normalizeId(String(item?.token || item?.id || '')))
+              );
+              if (filtered.length !== obj.giftLinks.length) {
+                window.localStorage.setItem(key, JSON.stringify({ ...obj, giftLinks: filtered }));
+              }
+            } else if (deletedSet.has(normalizeId(String(obj.token || obj.id || '')))) {
+              window.localStorage.removeItem(key);
+            }
+          }
+        } catch {
+          // ignore non-JSON entries
+        }
+      }
+    }
+  } catch {
+    // ignore storage errors
+  }
 }
 
 function randomCode(prefix: string, len: number): string {
@@ -262,12 +331,15 @@ function getAppShareBase(): string {
 }
 
 function buildPublicProfilePayload(profile: LabProfile) {
+  const normalizedWa =
+    formatWhatsAppPhone(profile.whatsappNumber || '') ||
+    String(profile.whatsappNumber || DEFAULT_LAB_PROFILE.whatsappNumber).trim();
   return {
     labName: String(profile.labName || DEFAULT_LAB_PROFILE.labName).slice(0, 120),
     tagline: String(profile.tagline || '').slice(0, 200),
     director: String(profile.director || '').slice(0, 160),
     hotlineNumber: String(profile.hotlineNumber || '').slice(0, 40),
-    whatsappNumber: String(profile.whatsappNumber || DEFAULT_LAB_PROFILE.whatsappNumber).slice(0, 40),
+    whatsappNumber: normalizedWa.slice(0, 40),
     address: String(profile.address || '').slice(0, 300),
     workingHours: String(profile.workingHours || '').slice(0, 200),
     branches: Array.isArray(profile.branches)
@@ -306,15 +378,27 @@ function mergePricesWithInitial(overrides: LabPriceItem[]): LabPriceItem[] {
 export const apiClient = {
   async getPublicConfig(encodedData?: string | null): Promise<{ labProfile: LabProfile; shareBaseUrl: string }> {
     const profile: LabProfile = { ...DEFAULT_LAB_PROFILE };
+    let hasServerProfile = false;
+    let hasServerWhatsapp = false;
     try {
-      const snap = await getDoc(doc(db, 'publicConfig', 'labProfile'));
+      let snap;
+      try {
+        snap = await getDocFromServer(doc(db, 'publicConfig', 'labProfile'));
+      } catch {
+        snap = await getDoc(doc(db, 'publicConfig', 'labProfile'));
+      }
       if (snap.exists()) {
+        hasServerProfile = true;
         const d = snap.data();
         profile.labName = String(d.labName || profile.labName);
         profile.tagline = String(d.tagline ?? profile.tagline);
         profile.director = String(d.director ?? profile.director);
         profile.hotlineNumber = String(d.hotlineNumber ?? profile.hotlineNumber);
-        profile.whatsappNumber = String(d.whatsappNumber || profile.whatsappNumber);
+        const serverWa = String(d.whatsappNumber || '').trim();
+        if (serverWa) {
+          profile.whatsappNumber = formatWhatsAppPhone(serverWa) || serverWa;
+          hasServerWhatsapp = true;
+        }
         profile.address = String(d.address ?? profile.address);
         profile.workingHours = String(d.workingHours ?? profile.workingHours);
         profile.branches = Array.isArray(d.branches) ? d.branches.map(String) : profile.branches;
@@ -330,9 +414,11 @@ export const apiClient = {
 
     const decoded = decodeBoxData(encodedData);
     if (decoded) {
-      if (decoded.ln) profile.labName = decoded.ln;
-      if (decoded.wa) profile.whatsappNumber = decoded.wa;
-      if (decoded.ht) profile.hotlineNumber = decoded.ht;
+      if (decoded.ln && !hasServerProfile) profile.labName = decoded.ln;
+      if (decoded.wa && !hasServerWhatsapp) {
+        profile.whatsappNumber = formatWhatsAppPhone(decoded.wa) || decoded.wa;
+      }
+      if (decoded.ht && !hasServerProfile) profile.hotlineNumber = decoded.ht;
     }
 
     return {
@@ -341,13 +427,61 @@ export const apiClient = {
     };
   },
 
+  subscribePublicProfile(onProfile: (profile: LabProfile, shareBaseUrl: string) => void): () => void {
+    return onSnapshot(
+      doc(db, 'publicConfig', 'labProfile'),
+      (snap) => {
+        if (!snap.exists()) return;
+        const d = snap.data();
+        const serverWa = String(d.whatsappNumber || '').trim();
+        const profile: LabProfile = {
+          ...DEFAULT_LAB_PROFILE,
+          labName: String(d.labName || DEFAULT_LAB_PROFILE.labName),
+          tagline: String(d.tagline ?? DEFAULT_LAB_PROFILE.tagline),
+          director: String(d.director ?? DEFAULT_LAB_PROFILE.director),
+          hotlineNumber: String(d.hotlineNumber ?? DEFAULT_LAB_PROFILE.hotlineNumber),
+          whatsappNumber: serverWa
+            ? formatWhatsAppPhone(serverWa) || serverWa
+            : DEFAULT_LAB_PROFILE.whatsappNumber,
+          address: String(d.address ?? DEFAULT_LAB_PROFILE.address),
+          workingHours: String(d.workingHours ?? DEFAULT_LAB_PROFILE.workingHours),
+          branches: Array.isArray(d.branches) ? d.branches.map(String) : DEFAULT_LAB_PROFILE.branches,
+          logoUrl: String(d.logoUrl || DEFAULT_ASSET_LOGO),
+          whatsappPatientClaimTemplate: String(
+            d.whatsappPatientClaimTemplate ?? DEFAULT_LAB_PROFILE.whatsappPatientClaimTemplate
+          ),
+          shareBaseUrl: String(d.shareBaseUrl ?? ''),
+        };
+        onProfile(profile, profile.shareBaseUrl || getAppShareBase());
+      },
+      () => {
+        // ignore transient snapshot errors on public read
+      }
+    );
+  },
+
   async getBoxByToken(
     token: string,
     encodedData?: string | null
-  ): Promise<{ ok: boolean; box?: BoxPublicResponse; message?: string }> {
+  ): Promise<{ ok: boolean; deleted?: boolean; box?: BoxPublicResponse; message?: string }> {
     const clean = normalizeId(token);
     if (!clean) {
       return { ok: false, message: 'رابط صندوق السعادة غير صحيح.' };
+    }
+
+    if (getDeletedTokensSet().has(clean)) {
+      addDeletedTokensLocally([clean]);
+      return { ok: false, deleted: true, message: 'تم حذف هذا السجل أو إلغاؤه من قِبل إدارة المعمل.' };
+    }
+
+    try {
+      const delSnap = await getDoc(doc(db, 'deletedLinks', clean));
+      if (delSnap.exists()) {
+        addDeletedTokensLocally([clean]);
+        return { ok: false, deleted: true, message: 'تم حذف هذا السجل أو إلغاؤه من قِبل إدارة المعمل.' };
+      }
+    } catch {
+      // continue if deletedLinks check failed offline
     }
 
     const path = `giftLinks/${clean}`;
@@ -401,6 +535,20 @@ export const apiClient = {
     const clean = normalizeId(token);
     if (!clean) {
       return { ok: false, message: 'رابط صندوق السعادة غير صحيح.' };
+    }
+
+    if (getDeletedTokensSet().has(clean)) {
+      addDeletedTokensLocally([clean]);
+      return { ok: false, message: 'تم حذف هذا السجل أو إلغاؤه من قِبل إدارة المعمل.' };
+    }
+    try {
+      const delSnap = await getDoc(doc(db, 'deletedLinks', clean));
+      if (delSnap.exists()) {
+        addDeletedTokensLocally([clean]);
+        return { ok: false, message: 'تم حذف هذا السجل أو إلغاؤه من قِبل إدارة المعمل.' };
+      }
+    } catch {
+      // continue
     }
 
     const linkRef = doc(db, 'giftLinks', clean);
@@ -1185,6 +1333,10 @@ export const apiClient = {
   async deleteGiftLink(id: string): Promise<boolean> {
     const cleanId = normalizeId(id);
     if (!cleanId) return false;
+
+    // Immediately record local tombstone & scrub localStorage caches so deleted record can never resurrect
+    addDeletedTokensLocally([cleanId]);
+
     let phoneHash = '';
     try {
       const linkSnap = await getDoc(doc(db, 'giftLinks', cleanId));
@@ -1213,6 +1365,10 @@ export const apiClient = {
     }
     batch.delete(doc(db, 'giftLinks', cleanId, 'private', 'contact'));
     batch.delete(doc(db, 'giftLinks', cleanId));
+    batch.set(doc(db, 'deletedLinks', cleanId), {
+      id: cleanId,
+      deletedAt: serverTimestamp(),
+    });
     try {
       await batch.commit();
       return true;
@@ -1644,7 +1800,17 @@ export const apiClient = {
     if (!clean || !cachedBox.prize || (cachedBox.status !== 'opened' && cachedBox.status !== 'redeemed')) {
       return false;
     }
+    if (getDeletedTokensSet().has(clean)) {
+      addDeletedTokensLocally([clean]);
+      return false;
+    }
     try {
+      const delSnap = await getDoc(doc(db, 'deletedLinks', clean));
+      if (delSnap.exists()) {
+        addDeletedTokensLocally([clean]);
+        return false;
+      }
+
       const snap = await getDoc(doc(db, 'giftLinks', clean));
       if (snap.exists()) {
         const existing = snap.data();
@@ -1726,18 +1892,31 @@ export const apiClient = {
     dashboardData: AdminDashboardData;
     recoveredLocalCount: number;
   }> {
-    // Step 1: Fetch authoritative server state for giftLinks
-    let linksSnap = await getDocsFromServer(collection(db, 'giftLinks'));
+    // Step 1: Fetch authoritative server state for giftLinks & permanent deletion tombstones
+    const [initialLinksSnap, deletedSnap] = await Promise.all([
+      getDocsFromServer(collection(db, 'giftLinks')),
+      getDocsFromServer(collection(db, 'deletedLinks')).catch(() => null),
+    ]);
+    let linksSnap = initialLinksSnap;
     const existingIds = new Set(linksSnap.docs.map((d) => d.id));
+    const deletedIds = getDeletedTokensSet();
+    if (deletedSnap) {
+      const serverDeletedTokens = deletedSnap.docs.map((d) => d.id);
+      serverDeletedTokens.forEach((id) => deletedIds.add(normalizeId(id)));
+      if (serverDeletedTokens.length > 0) {
+        addDeletedTokensLocally(serverDeletedTokens);
+      }
+    }
     let recoveredLocalCount = 0;
 
     // Step 2: Recover any locally-cached bookings from this browser's localStorage that never reached Firestore
+    // (explicitly skipping any token that has been deleted)
     if (typeof window !== 'undefined' && window.localStorage) {
       try {
         const localCandidates: Array<Record<string, unknown>> = [];
         for (let i = 0; i < window.localStorage.length; i++) {
           const key = window.localStorage.key(i);
-          if (!key) continue;
+          if (!key || key === DELETED_TOKENS_STORAGE_KEY) continue;
           if (key.startsWith('rt_hb_won_') || key.includes('giftLinks') || key.includes('happiness')) {
             const raw = window.localStorage.getItem(key);
             if (!raw) continue;
@@ -1764,7 +1943,7 @@ export const apiClient = {
 
         const toRecover = localCandidates.filter((c) => {
           const tok = normalizeId(String(c.token || c.id || ''));
-          return Boolean(tok && !existingIds.has(tok) && (c.prize || c.prizeTitle));
+          return Boolean(tok && !existingIds.has(tok) && !deletedIds.has(tok) && (c.prize || c.prizeTitle));
         });
 
         if (toRecover.length > 0) {

@@ -25,6 +25,7 @@ import {
   buildPatientClaimWhatsAppUrl,
   copyToClipboard,
   formatArabicDate,
+  formatWhatsAppPhone,
   getTimeRemaining,
 } from '../utils/whatsapp';
 import { playBoxOpenChime } from '../utils/sound';
@@ -92,6 +93,16 @@ export function PatientBoxView({
       try {
         const data = await apiClient.getBoxByToken(targetToken, encodedData);
         if (!data.ok || !data.box) {
+          if (data.deleted) {
+            try {
+              window.localStorage.removeItem(cacheKey);
+            } catch {
+              // ignore
+            }
+            setBox(null);
+            setErrorMsg(data.message || 'تم حذف هذا السجل أو إلغاؤه من قِبل إدارة المعمل.');
+            return;
+          }
           if (cachedParsed) {
             setBox(cachedParsed);
             void apiClient.syncCachedBoxToCloud(cachedParsed);
@@ -517,7 +528,7 @@ export function PatientBoxView({
                 انتهت المهلة المحددة لهذا الرابط بتاريخ {formatArabicDate(box.expiresAt)}. يمكنك التواصل مع المعمل للحصول على رابط جديد.
               </p>
               <a
-                href={`https://wa.me/${labProfile.whatsappNumber.replace(/\D/g, '')}`}
+                href={`https://wa.me/${formatWhatsAppPhone(labProfile.whatsappNumber || labProfile.hotlineNumber)}`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-teal-700 px-5 py-2.5 text-sm font-bold text-white hover:bg-teal-800"

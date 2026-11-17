@@ -161,6 +161,16 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "activeToken", "expiresAt", "lockUntil", "updatedAt"]
+    },
+    "DeletedLink": {
+      "title": "DeletedLink",
+      "description": "Tombstone marker preventing deleted giftLinks from being re-hydrated or recovered.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "deletedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "deletedAt"]
     }
   },
   "firestore": {
@@ -191,6 +201,10 @@
     "/phoneLocks/{phoneHash}": {
       "schema": { "$ref": "#/entities/PhoneLock" },
       "description": "Hashed phone deduplication locks enforcing one active prize per phone until expiry."
+    },
+    "/deletedLinks/{linkId}": {
+      "schema": { "$ref": "#/entities/DeletedLink" },
+      "description": "Permanent deletion tombstones blocking re-hydration of deleted patient links."
     }
   }
 }

@@ -1,7 +1,8 @@
-import { useRef, useState } from 'react';
-import { ImagePlus, Plus, RotateCcw, Save, Trash2 } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { ExternalLink, ImagePlus, MessageCircle, Plus, RotateCcw, Save, Trash2 } from 'lucide-react';
 import type { LabProfile } from '../types';
 import { apiClient } from '../services/apiClient';
+import { formatWhatsAppPhone } from '../utils/whatsapp';
 
 const BASE_PATH = import.meta.env.BASE_URL || '/';
 const DEFAULT_ASSET_LOGO = `${BASE_PATH}logo.jpg`;
@@ -19,9 +20,21 @@ export function AdminSettingsTab({
   onNotify,
 }: AdminSettingsTabProps) {
   const [form, setForm] = useState<LabProfile>(labProfile);
+  const [isDirty, setIsDirty] = useState(false);
   const [newBranch, setNewBranch] = useState('');
   const [saving, setSaving] = useState(false);
   const fileRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (!isDirty) {
+      setForm(labProfile);
+    }
+  }, [labProfile, isDirty]);
+
+  const updateForm = (updater: Partial<LabProfile>) => {
+    setIsDirty(true);
+    setForm((prev) => ({ ...prev, ...updater }));
+  };
 
   const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -57,14 +70,25 @@ export function AdminSettingsTab({
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     if (saving) return;
+    const normalizedWa = formatWhatsAppPhone(form.whatsappNumber || '');
+    if (!normalizedWa || normalizedWa.length < 10) {
+      onNotify('يرجى إدخال رقم واتساب صحيح (مثال: 010xxxxxxxx أو 2011xxxxxxxx).', true);
+      return;
+    }
+    const payload: LabProfile = {
+      ...form,
+      whatsappNumber: normalizedWa,
+    };
     setSaving(true);
     try {
-      const data = await apiClient.updateLabProfile(form);
+      const data = await apiClient.updateLabProfile(payload);
       if (!data.ok || !data.labProfile) {
         onNotify(data.message || 'تعذر حفظ الإعدادات.', true);
       } else {
+        setForm(data.labProfile);
+        setIsDirty(false);
         onProfileSaved(data.labProfile);
-        onNotify(data.message || 'تم حفظ وتثبيت بيانات المعمل والشعار في السحابة.');
+        onNotify(`تم حفظ وتفعيل رقم الواتساب الجديد (${normalizedWa}) للإرسال والاستقبال فوراً.`);
       }
     } catch {
       onNotify('تعذر الاتصال بقاعدة البيانات.', true);
@@ -157,16 +181,40 @@ export function AdminSettingsTab({
             />
           </div>
           <div>
-            <label className="mb-1 block text-xs font-bold text-slate-700">رقم واتساب المعمل الرسمي</label>
-            <input
-              type="text"
-              dir="ltr"
-              required
-              value={form.whatsappNumber}
-              onChange={(e) => setForm({ ...form, whatsappNumber: e.target.value })}
-              placeholder="201100874444"
-              className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-left font-mono text-sm focus:border-teal-700 focus:outline-none"
-            />
+            <label className="mb-1 block text-xs font-bold text-slate-700">
+              رقم واتساب المعمل الرسمي (للإرسال والاستقبال) *
+            </label>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                dir="ltr"
+                required
+                value={form.whatsappNumber}
+                onChange={(e) => updateForm({ whatsappNumber: e.target.value })}
+                placeholder="010xxxxxxxx أو 2011xxxxxxxx"
+                className="flex-1 rounded-xl border border-slate-300 px-3.5 py-2.5 text-left font-mono text-sm focus:border-teal-700 focus:outline-none"
+              />
+              {formatWhatsAppPhone(form.whatsappNumber) ? (
+                <a
+                  href={`https://wa.me/${formatWhatsAppPhone(form.whatsappNumber)}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title="اختبار فتح الرقم على واتساب"
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-800 hover:bg-emerald-100 whitespace-nowrap"
+                >
+                  <MessageCircle className="h-3.5 w-3.5" />
+                  <span>تجربة</span>
+                  <ExternalLink className="h-3 w-3" />
+                </a>
+              ) : null}
+            </div>
+            <p className="mt-1 text-[11px] text-slate-500">
+              صيغة التفعيل المباشر:{' '}
+              <span dir="ltr" className="font-mono font-bold text-teal-800">
+                +{formatWhatsAppPhone(form.whatsappNumber) || '—'}
+              </span>{' '}
+              (يُفعّل تلقائياً لاستقبال رسائل الفوز من جميع روابط المرضى الجديدة والقديمة)
+            </p>
           </div>
           <div>
             <label className="mb-1 block text-xs font-bold text-slate-700">العنوان الرئيسي</label>

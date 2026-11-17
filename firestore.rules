@@ -251,6 +251,14 @@ service cloud.firestore {
       data.updatedAt is timestamp;
     }
 
+    function isValidDeletedLink(data) {
+      return data.keys().hasAll(['id', 'deletedAt']) &&
+      data.keys().hasOnly(['id', 'deletedAt']) &&
+      isValidId(data.id) &&
+      data.id.size() <= 64 &&
+      data.deletedAt is timestamp;
+    }
+
     match /admins/{uid} {
       allow get: if isSignedIn() && request.auth.uid == uid;
       allow list, write: if false;
@@ -300,6 +308,7 @@ service cloud.firestore {
         existsAfter(/databases/$(database)/documents/giftLinks/$(linkId)/private/contact) && (
           isAdmin() ||
           (
+            !exists(/databases/$(database)/documents/deletedLinks/$(linkId)) &&
             incoming().status == 'opened' &&
             (!('redeemedAt' in incoming()) || incoming().redeemedAt == null) &&
             (!('redeemedBy' in incoming()) || incoming().redeemedBy == null) &&
@@ -397,6 +406,17 @@ service cloud.firestore {
           )
         );
       allow delete: if isAdmin() && isValidId(phoneHash);
+    }
+
+    match /deletedLinks/{linkId} {
+      allow get: if isValidId(linkId);
+      allow list: if isAdmin();
+      allow create, update: if isAdmin() &&
+        isValidId(linkId) &&
+        isValidDeletedLink(incoming()) &&
+        incoming().id == linkId &&
+        incoming().deletedAt == request.time;
+      allow delete: if isAdmin() && isValidId(linkId);
     }
   }
 }

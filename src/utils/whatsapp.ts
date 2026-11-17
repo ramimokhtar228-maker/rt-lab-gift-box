@@ -1,8 +1,12 @@
 import type { BoxPublicResponse, GiftLink, LabProfile } from '../types';
+import { normalizeArabicDigits } from './phoneHash';
 
 export function formatWhatsAppPhone(raw: string): string {
-  const digits = raw.replace(/\D/g, '');
+  let digits = normalizeArabicDigits(String(raw || '')).replace(/\D/g, '');
   if (!digits) return '';
+  if (digits.startsWith('00')) {
+    digits = digits.slice(2);
+  }
   if (digits.startsWith('01') && digits.length === 11) {
     return `2${digits}`;
   }
@@ -182,6 +186,8 @@ export function buildPatientClaimWhatsAppUrl(box: BoxPublicResponse, lab: LabPro
     expiresAt: formatArabicDate(box.expiresAt),
     visitRef: box.visitRef,
     branchName: box.branchName,
+    whatsappNumber: phone || lab.whatsappNumber,
+    hotlineNumber: lab.hotlineNumber,
   });
   return `https://wa.me/${phone}?text=${encodeURIComponent(text)}`;
 }
@@ -201,12 +207,15 @@ export function buildAdminInviteText(
     labProfile: lab,
     prizes,
   });
+  const labPhone = formatWhatsAppPhone(lab.whatsappNumber || lab.hotlineNumber);
   return applyTemplate(lab.whatsappInviteTemplate, {
     labName: lab.labName,
     clientName: link.clientName,
     boxUrl,
     visitRef: link.visitRef,
     branchName: link.branchName,
+    whatsappNumber: labPhone || lab.whatsappNumber,
+    hotlineNumber: lab.hotlineNumber,
   });
 }
 
@@ -223,6 +232,7 @@ export function buildAdminInviteWhatsAppUrl(
 
 export function buildAdminWinnerReplyWhatsAppUrl(link: GiftLink, lab: LabProfile): string {
   const phone = formatWhatsAppPhone(link.clientPhone);
+  const labPhone = formatWhatsAppPhone(lab.whatsappNumber || lab.hotlineNumber);
   const apptText = link.appointmentAt?.trim()
     ? `\n📅 الموعد المحدد: ${link.appointmentAt.trim()}${
         link.appointmentNote?.trim() ? ` (${link.appointmentNote.trim()})` : ''
@@ -239,6 +249,8 @@ export function buildAdminWinnerReplyWhatsAppUrl(link: GiftLink, lab: LabProfile
     visitRef: link.visitRef,
     branchName: link.branchName || '',
     appointmentAt: link.appointmentAt?.trim() || 'لم يحدد بعد',
+    whatsappNumber: labPhone || lab.whatsappNumber,
+    hotlineNumber: lab.hotlineNumber,
   });
 
   if (!lab.whatsappWinnerReplyTemplate.includes('{appointmentAt}') && apptText) {

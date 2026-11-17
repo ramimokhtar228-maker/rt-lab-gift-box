@@ -28,6 +28,7 @@ import {
   copyToClipboard,
   exportLinksExcelCsv,
   formatArabicDate,
+  formatWhatsAppPhone,
   getTimeRemaining,
 } from '../utils/whatsapp';
 
@@ -88,6 +89,7 @@ export function AdminLinksTab({
   const [manualPhone, setManualPhone] = useState('');
   const [manualPrizeTitle, setManualPrizeTitle] = useState(prizes[0]?.title || '');
   const [manualPrizeCode, setManualPrizeCode] = useState('');
+  const [locallyDeletedIds, setLocallyDeletedIds] = useState<string[]>([]);
 
   const publicBase =
     shareBaseUrl || (typeof window !== 'undefined' ? window.location.origin : '');
@@ -163,13 +165,17 @@ export function AdminLinksTab({
   };
 
   const handleDeleteLink = async (id: string) => {
+    setLocallyDeletedIds((prev) => (prev.includes(id) ? prev : [...prev, id]));
     try {
       const ok = await apiClient.deleteGiftLink(id);
       if (ok) {
-        await onRefresh();
-        onNotify('تم حذف السجل.');
+        onNotify('تم حذف المريض وسجله نهائياً دون الرجوع.');
+      } else {
+        setLocallyDeletedIds((prev) => prev.filter((item) => item !== id));
+        onNotify('تعذر حذف السجل.', true);
       }
     } catch {
+      setLocallyDeletedIds((prev) => prev.filter((item) => item !== id));
       onNotify('تعذر حذف السجل.', true);
     }
   };
@@ -342,7 +348,9 @@ export function AdminLinksTab({
 
   const filteredLinks = useMemo(() => {
     const q = search.trim().toLowerCase();
+    const deletedSet = new Set(locallyDeletedIds);
     return links.filter((l) => {
+      if (deletedSet.has(l.id)) return false;
       if (statusFilter !== 'all' && l.status !== statusFilter) return false;
       if (!q) return true;
       return (
@@ -353,7 +361,7 @@ export function AdminLinksTab({
         (l.prizeTitle || '').toLowerCase().includes(q)
       );
     });
-  }, [links, search, statusFilter]);
+  }, [links, locallyDeletedIds, search, statusFilter]);
 
   const statusText = (s: GiftLink['status']) => {
     switch (s) {
@@ -392,7 +400,10 @@ export function AdminLinksTab({
                 إرسال رابط صندوق السعادة لمريض
               </h2>
               <p className="text-xs text-slate-500">
-                أنشئ رابطاً خاصاً بالمريض وأرسله عبر واتساب — وتظهر نتيجته هنا فور فتحه.
+                أنشئ رابطاً خاصاً بالمريض وأرسله عبر واتساب — وتظهر نتيجته هنا فور فتحه. رقم واتساب المعمل المفعّل للإرسال والاستقبال:{' '}
+                <span dir="ltr" className="font-mono font-bold text-teal-800">
+                  +{formatWhatsAppPhone(labProfile.whatsappNumber || labProfile.hotlineNumber)}
+                </span>
               </p>
             </div>
             <button
