@@ -3,9 +3,10 @@ import {
   deleteDoc,
   doc,
   getDoc,
+  getDocFromServer,
   getDocs,
+  getDocsFromServer,
   onSnapshot,
-  orderBy,
   query,
   serverTimestamp,
   Timestamp,
@@ -994,11 +995,13 @@ export const apiClient = {
     );
 
     const unsubLinks = onSnapshot(
-      query(collection(db, 'giftLinks'), orderBy('createdAt', 'desc')),
+      collection(db, 'giftLinks'),
       async (snap) => {
         const docs = snap.docs;
-        // Fetch private phone numbers for any uncached link IDs
-        const missingIds = docs.map((d) => d.id).filter((id) => !phoneCache.has(id));
+        // Fetch private phone numbers for any uncached link IDs (or empty cache retries)
+        const missingIds = docs
+          .map((d) => d.id)
+          .filter((id) => !phoneCache.has(id) || !phoneCache.get(id));
         if (missingIds.length > 0) {
           await Promise.all(
             missingIds.map(async (id) => {
@@ -1006,17 +1009,23 @@ export const apiClient = {
                 const contactSnap = await getDoc(doc(db, 'giftLinks', id, 'private', 'contact'));
                 if (contactSnap.exists()) {
                   phoneCache.set(id, String(contactSnap.data().clientPhone || ''));
-                } else {
+                } else if (!phoneCache.has(id)) {
                   phoneCache.set(id, '');
                 }
               } catch {
-                phoneCache.set(id, '');
+                if (!phoneCache.has(id)) phoneCache.set(id, '');
               }
             })
           );
         }
 
-        giftLinks = docs.map((d) => docToGiftLink(d.id, d.data(), phoneCache.get(d.id) || ''));
+        giftLinks = docs
+          .map((d) => docToGiftLink(d.id, d.data(), phoneCache.get(d.id) || ''))
+          .sort((a, b) => {
+            const ta = new Date(a.openedAt || a.createdAt).getTime() || 0;
+            const tb = new Date(b.openedAt || b.createdAt).getTime() || 0;
+            return tb - ta;
+          });
         emit();
       },
       (err) => {
@@ -1627,6 +1636,448 @@ export const apiClient = {
       };
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, 'importFullBackup');
+    }
+  },
+
+  async syncCachedBoxToCloud(cachedBox: BoxPublicResponse): Promise<boolean> {
+    const clean = normalizeId(cachedBox.token || '');
+    if (!clean || !cachedBox.prize || (cachedBox.status !== 'opened' && cachedBox.status !== 'redeemed')) {
+      return false;
+    }
+    try {
+      const snap = await getDoc(doc(db, 'giftLinks', clean));
+      if (snap.exists()) {
+        const existing = snap.data();
+        if (existing.status === 'opened' || existing.status === 'redeemed') {
+          return false;
+        }
+      }
+
+      const validHours = Math.max(1, Number(cachedBox.prize.validHours || 48));
+      const openedAt = cachedBox.openedAt || new Date().toISOString();
+      const expiresAt =
+        cachedBox.expiresAt && !Number.isNaN(new Date(cachedBox.expiresAt).getTime())
+          ? cachedBox.expiresAt
+          : new Date(Date.now() + validHours * 3600_000).toISOString();
+      const prizeTerms = (
+        cachedBox.prize.terms ||
+        buildDefaultPrizeTerms({
+          title: cachedBox.prize.title,
+          category: cachedBox.prize.category,
+          validHours,
+        })
+      ).slice(0, 1000);
+
+      const batch = writeBatch(db);
+      if (snap.exists()) {
+        batch.update(doc(db, 'giftLinks', clean), {
+          status: 'opened',
+          openedAt,
+          expiresAt,
+          prizeId: 'prz_cached',
+          prizeTitle: cachedBox.prize.title.slice(0, 200),
+          prizeDescription: (cachedBox.prize.description || '').slice(0, 600),
+          prizeTerms,
+          prizeDiscountLabel: (cachedBox.prize.discountLabel || 'هدية خاصة').slice(0, 80),
+          prizeCategory: String(cachedBox.prize.category || 'DISCOUNT').slice(0, 40),
+          prizeCode: (cachedBox.prize.prizeCode || randomCode('RTWIN-', 6)).slice(0, 64),
+          validHours,
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        batch.set(doc(db, 'giftLinks', clean), {
+          id: clean,
+          token: clean,
+          clientName: String(cachedBox.clientName || 'عميلنا العزيز').slice(0, 120),
+          visitRef: String(cachedBox.visitRef || `RT-${Math.floor(1000 + Math.random() * 9000)}`).slice(0, 64),
+          branchName: String(cachedBox.branchName || DEFAULT_LAB_PROFILE.branches[0]).slice(0, 160),
+          status: 'opened',
+          createdAt: serverTimestamp(),
+          expiresAt,
+          openedAt,
+          redeemedAt: null,
+          redeemedBy: null,
+          appointmentAt: cachedBox.appointmentAt || null,
+          appointmentNote: cachedBox.appointmentNote || null,
+          prizeId: 'prz_cached',
+          prizeTitle: cachedBox.prize.title.slice(0, 200),
+          prizeDescription: (cachedBox.prize.description || '').slice(0, 600),
+          prizeTerms,
+          prizeDiscountLabel: (cachedBox.prize.discountLabel || 'هدية خاصة').slice(0, 80),
+          prizeCategory: String(cachedBox.prize.category || 'DISCOUNT').slice(0, 40),
+          prizeCode: (cachedBox.prize.prizeCode || randomCode('RTWIN-', 6)).slice(0, 64),
+          validHours,
+          updatedAt: serverTimestamp(),
+        });
+        batch.set(doc(db, 'giftLinks', clean, 'private', 'contact'), {
+          clientPhone: '',
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+      await batch.commit();
+      return true;
+    } catch {
+      return false;
+    }
+  },
+
+  async forceSyncServerDashboard(): Promise<{
+    dashboardData: AdminDashboardData;
+    recoveredLocalCount: number;
+  }> {
+    // Step 1: Fetch authoritative server state for giftLinks
+    let linksSnap = await getDocsFromServer(collection(db, 'giftLinks'));
+    const existingIds = new Set(linksSnap.docs.map((d) => d.id));
+    let recoveredLocalCount = 0;
+
+    // Step 2: Recover any locally-cached bookings from this browser's localStorage that never reached Firestore
+    if (typeof window !== 'undefined' && window.localStorage) {
+      try {
+        const localCandidates: Array<Record<string, unknown>> = [];
+        for (let i = 0; i < window.localStorage.length; i++) {
+          const key = window.localStorage.key(i);
+          if (!key) continue;
+          if (key.startsWith('rt_hb_won_') || key.includes('giftLinks') || key.includes('happiness')) {
+            const raw = window.localStorage.getItem(key);
+            if (!raw) continue;
+            try {
+              const parsed = JSON.parse(raw);
+              if (Array.isArray(parsed)) {
+                parsed.forEach((item) => {
+                  if (item && typeof item === 'object') localCandidates.push(item as Record<string, unknown>);
+                });
+              } else if (parsed && typeof parsed === 'object') {
+                if (Array.isArray((parsed as Record<string, unknown>).giftLinks)) {
+                  ((parsed as Record<string, unknown>).giftLinks as Array<Record<string, unknown>>).forEach(
+                    (item) => localCandidates.push(item)
+                  );
+                } else if ((parsed as Record<string, unknown>).token) {
+                  localCandidates.push(parsed as Record<string, unknown>);
+                }
+              }
+            } catch {
+              // ignore non-JSON entries
+            }
+          }
+        }
+
+        const toRecover = localCandidates.filter((c) => {
+          const tok = normalizeId(String(c.token || c.id || ''));
+          return Boolean(tok && !existingIds.has(tok) && (c.prize || c.prizeTitle));
+        });
+
+        if (toRecover.length > 0) {
+          for (let i = 0; i < toRecover.length; i += 100) {
+            const chunk = toRecover.slice(i, i + 100);
+            const batch = writeBatch(db);
+            for (const c of chunk) {
+              const tok = normalizeId(String(c.token || c.id || ''));
+              if (!tok || existingIds.has(tok)) continue;
+              existingIds.add(tok);
+              const prizeObj = (c.prize as Record<string, unknown> | undefined) || {};
+              const title = String(c.prizeTitle || prizeObj.title || '').trim().slice(0, 200);
+              if (!title) continue;
+              const category = (c.prizeCategory || prizeObj.category || 'DISCOUNT') as PrizeCategory;
+              const validHours = Math.min(2160, Math.max(1, Number(c.validHours || prizeObj.validHours || 48)));
+              const openedAt = String(c.openedAt || new Date().toISOString()).slice(0, 64);
+              const expiresAt = String(
+                c.expiresAt || new Date(Date.now() + validHours * 3600_000).toISOString()
+              ).slice(0, 64);
+              const phone = normalizeCanonicalPhone(String(c.clientPhone || ''));
+              const phoneHash = phone.length >= 8 ? await hashPhoneNumber(phone) : '';
+              const prizeTerms = String(
+                c.prizeTerms || prizeObj.terms || buildDefaultPrizeTerms({ title, category, validHours })
+              ).slice(0, 1000);
+
+              batch.set(doc(db, 'giftLinks', tok), {
+                id: tok,
+                token: tok,
+                clientName: String(c.clientName || 'عميلنا العزيز').slice(0, 120),
+                visitRef: String(c.visitRef || `RT-${Math.floor(1000 + Math.random() * 9000)}`).slice(0, 64),
+                branchName: String(c.branchName || DEFAULT_LAB_PROFILE.branches[0]).slice(0, 160),
+                ...(phoneHash ? { phoneHash } : {}),
+                status: 'opened',
+                createdAt: serverTimestamp(),
+                expiresAt,
+                openedAt,
+                redeemedAt: null,
+                redeemedBy: null,
+                appointmentAt: c.appointmentAt ? String(c.appointmentAt).slice(0, 120) : null,
+                appointmentNote: c.appointmentNote ? String(c.appointmentNote).slice(0, 300) : null,
+                prizeId: String(c.prizeId || 'prz_recovered').slice(0, 128),
+                prizeTitle: title,
+                prizeDescription: String(c.prizeDescription || prizeObj.description || title).slice(0, 600),
+                prizeTerms,
+                prizeDiscountLabel: String(c.prizeDiscountLabel || prizeObj.discountLabel || 'هدية خاصة').slice(0, 80),
+                prizeCategory: String(category).slice(0, 40),
+                prizeCode: String(c.prizeCode || prizeObj.prizeCode || randomCode('RTWIN-', 6)).slice(0, 64),
+                validHours,
+                updatedAt: serverTimestamp(),
+              });
+              batch.set(doc(db, 'giftLinks', tok, 'private', 'contact'), {
+                clientPhone: phone || '',
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              });
+              recoveredLocalCount++;
+            }
+            await batch.commit();
+          }
+          linksSnap = await getDocsFromServer(collection(db, 'giftLinks'));
+        }
+      } catch (err) {
+        console.warn('Local recovery check warning:', err);
+      }
+    }
+
+    // Step 3: Fetch remaining collections directly from server
+    const [profileSnap, templatesSnap, prizesSnap, pricesSnap] = await Promise.all([
+      getDocFromServer(doc(db, 'publicConfig', 'labProfile')).catch(() => null),
+      getDocFromServer(doc(db, 'adminSettings', 'templates')).catch(() => null),
+      getDocsFromServer(collection(db, 'prizes')),
+      getDocsFromServer(collection(db, 'prices')),
+    ]);
+
+    const labProfile: LabProfile = { ...DEFAULT_LAB_PROFILE };
+    if (profileSnap?.exists()) {
+      const d = profileSnap.data();
+      labProfile.labName = String(d.labName || labProfile.labName);
+      labProfile.tagline = String(d.tagline ?? labProfile.tagline);
+      labProfile.director = String(d.director ?? labProfile.director);
+      labProfile.hotlineNumber = String(d.hotlineNumber ?? labProfile.hotlineNumber);
+      labProfile.whatsappNumber = String(d.whatsappNumber || labProfile.whatsappNumber);
+      labProfile.address = String(d.address ?? labProfile.address);
+      labProfile.workingHours = String(d.workingHours ?? labProfile.workingHours);
+      labProfile.branches = Array.isArray(d.branches) ? d.branches.map(String) : labProfile.branches;
+      labProfile.logoUrl = String(d.logoUrl || DEFAULT_ASSET_LOGO);
+      labProfile.whatsappPatientClaimTemplate = String(
+        d.whatsappPatientClaimTemplate ?? labProfile.whatsappPatientClaimTemplate
+      );
+      labProfile.shareBaseUrl = String(d.shareBaseUrl ?? '');
+    }
+    if (templatesSnap?.exists()) {
+      const d = templatesSnap.data();
+      labProfile.whatsappInviteTemplate = String(
+        d.whatsappInviteTemplate ?? labProfile.whatsappInviteTemplate
+      );
+      labProfile.whatsappWinnerReplyTemplate = String(
+        d.whatsappWinnerReplyTemplate ?? labProfile.whatsappWinnerReplyTemplate
+      );
+    }
+
+    const prizes: Prize[] = prizesSnap.empty
+      ? DEFAULT_PRIZES
+      : prizesSnap.docs.map((d) => {
+          const data = d.data();
+          const title = String(data.title || '');
+          const category = (data.category as PrizeCategory) || 'DISCOUNT';
+          const validHours = Number(data.validHours || 48);
+          const matched = DEFAULT_PRIZES.find((p) => p.id === d.id || p.title === title);
+          return {
+            id: d.id,
+            title,
+            description: String(data.description || ''),
+            terms: data.terms
+              ? String(data.terms)
+              : matched?.terms || buildDefaultPrizeTerms({ title, category, validHours }),
+            discountLabel: String(data.discountLabel || 'هدية خاصة'),
+            category,
+            validHours,
+            weight: Number(data.weight || 20),
+            stock: Number(data.stock || 50),
+            usedCount: Number(data.usedCount || 0),
+            active: Boolean(data.active),
+          };
+        });
+
+    const phones = new Map<string, string>();
+    await Promise.all(
+      linksSnap.docs.map(async (d) => {
+        try {
+          const c = await getDocFromServer(doc(db, 'giftLinks', d.id, 'private', 'contact'));
+          if (c.exists()) phones.set(d.id, String(c.data().clientPhone || ''));
+        } catch {
+          // ignore
+        }
+      })
+    );
+
+    const giftLinks = linksSnap.docs
+      .map((d) => docToGiftLink(d.id, d.data(), phones.get(d.id) || ''))
+      .sort((a, b) => {
+        const ta = new Date(a.openedAt || a.createdAt).getTime() || 0;
+        const tb = new Date(b.openedAt || b.createdAt).getTime() || 0;
+        return tb - ta;
+      });
+
+    const priceOverrides: LabPriceItem[] = pricesSnap.docs.map((d) => {
+      const data = d.data();
+      return {
+        id: d.id,
+        code: String(data.code || ''),
+        nameAr: String(data.nameAr || ''),
+        nameEn: data.nameEn ? String(data.nameEn) : undefined,
+        category: String(data.category || 'general'),
+        price: Number(data.price || 0),
+        offerPrice: typeof data.offerPrice === 'number' ? data.offerPrice : undefined,
+        duration: data.duration ? String(data.duration) : undefined,
+        active: data.active !== false,
+      };
+    });
+    const prices = mergePricesWithInitial(priceOverrides);
+
+    const usedMap = new Map<string, number>();
+    for (const lnk of giftLinks) {
+      if (lnk.prizeId) usedMap.set(lnk.prizeId, (usedMap.get(lnk.prizeId) || 0) + 1);
+    }
+    const enrichedPrizes = prizes.map((p) => ({
+      ...p,
+      usedCount: Math.max(p.usedCount, usedMap.get(p.id) || 0),
+    }));
+
+    return {
+      recoveredLocalCount,
+      dashboardData: {
+        labProfile,
+        prizes: enrichedPrizes,
+        giftLinks,
+        prices,
+        stats: {
+          totalLinks: giftLinks.length,
+          pendingLinks: giftLinks.filter((l) => l.status === 'pending').length,
+          openedLinks: giftLinks.filter((l) => l.status === 'opened').length,
+          redeemedLinks: giftLinks.filter((l) => l.status === 'redeemed').length,
+          expiredLinks: giftLinks.filter((l) => l.status === 'expired').length,
+          activePrizes: enrichedPrizes.filter((p) => p.active).length,
+          totalPrices: prices.filter((p) => p.active).length,
+        },
+      },
+    };
+  },
+
+  async importRecoveredBookings(
+    items: Array<{
+      clientName: string;
+      clientPhone?: string;
+      prizeTitle: string;
+      discountLabel?: string;
+      prizeCode?: string;
+      branchName?: string;
+      status?: 'opened' | 'redeemed';
+      validHours?: number;
+    }>,
+    existingLinks: GiftLink[],
+    prizesCatalog: Prize[]
+  ): Promise<{ ok: boolean; importedCount: number; skippedDuplicates: number }> {
+    const existingCodes = new Set(
+      existingLinks.map((l) => (l.prizeCode || '').trim().toUpperCase()).filter(Boolean)
+    );
+    const allPrizes = prizesCatalog.length > 0 ? prizesCatalog : DEFAULT_PRIZES;
+    let importedCount = 0;
+    let skippedDuplicates = 0;
+
+    try {
+      const now = Date.now();
+      for (let i = 0; i < items.length; i += 100) {
+        const chunk = items.slice(i, i + 100);
+        const batch = writeBatch(db);
+        let batchOps = 0;
+
+        for (const item of chunk) {
+          const cleanName = String(item.clientName || '').trim().slice(0, 120);
+          const cleanPrizeTitle = String(item.prizeTitle || '').trim().slice(0, 200);
+          if (!cleanName || !cleanPrizeTitle) continue;
+
+          const codeUpper = String(item.prizeCode || '').trim().toUpperCase();
+          if (codeUpper && existingCodes.has(codeUpper)) {
+            skippedDuplicates++;
+            continue;
+          }
+
+          const matchedPrize =
+            allPrizes.find((p) => p.title.trim() === cleanPrizeTitle) ||
+            allPrizes.find(
+              (p) =>
+                cleanPrizeTitle.includes(p.title.trim()) || p.title.trim().includes(cleanPrizeTitle)
+            );
+
+          const validHours = Math.min(
+            2160,
+            Math.max(1, Number(item.validHours || matchedPrize?.validHours || 72))
+          );
+          const category = matchedPrize?.category || 'DISCOUNT';
+          const discountLabel = String(
+            item.discountLabel || matchedPrize?.discountLabel || 'هدية خاصة'
+          ).slice(0, 80);
+          const description = String(
+            matchedPrize?.description || `${cleanPrizeTitle} — جائزة صندوق السعادة من معامل RT.`
+          ).slice(0, 600);
+          const prizeTerms = String(
+            matchedPrize?.terms ||
+              buildDefaultPrizeTerms({ title: cleanPrizeTitle, category, validHours })
+          ).slice(0, 1000);
+
+          const token = randomCode('RTBOX-', 6);
+          const prizeCode = (codeUpper || randomCode('RTWIN-', 6)).slice(0, 64);
+          existingCodes.add(prizeCode);
+          const openedAt = new Date(now).toISOString();
+          const expiresAt = new Date(now + validHours * 3600_000).toISOString();
+          const canonicalPhone = normalizeCanonicalPhone(String(item.clientPhone || '')).slice(0, 40);
+          const phoneHash = canonicalPhone.length >= 8 ? await hashPhoneNumber(canonicalPhone) : '';
+          const status = item.status === 'redeemed' ? 'redeemed' : 'opened';
+
+          batch.set(doc(db, 'giftLinks', token), {
+            id: token,
+            token,
+            clientName: cleanName,
+            visitRef: `RT-${Math.floor(1000 + Math.random() * 9000)}`,
+            branchName: String(item.branchName || DEFAULT_LAB_PROFILE.branches[0]).slice(0, 160),
+            ...(phoneHash ? { phoneHash } : {}),
+            status,
+            createdAt: serverTimestamp(),
+            expiresAt,
+            openedAt,
+            redeemedAt: status === 'redeemed' ? openedAt : null,
+            redeemedBy: status === 'redeemed' ? 'استيراد وتفعيل من الإدارة' : null,
+            appointmentAt: null,
+            appointmentNote: null,
+            prizeId: (matchedPrize?.id || 'prz_imported').slice(0, 128),
+            prizeTitle: cleanPrizeTitle,
+            prizeDescription: description,
+            prizeTerms,
+            prizeDiscountLabel: discountLabel,
+            prizeCategory: String(category).slice(0, 40),
+            prizeCode,
+            validHours,
+            updatedAt: serverTimestamp(),
+          });
+          batch.set(doc(db, 'giftLinks', token, 'private', 'contact'), {
+            clientPhone: canonicalPhone,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+          if (phoneHash) {
+            batch.set(doc(db, 'phoneLocks', phoneHash), {
+              id: phoneHash,
+              activeToken: token,
+              expiresAt,
+              lockUntil: Timestamp.fromMillis(now + validHours * 3600_000),
+              updatedAt: serverTimestamp(),
+            });
+          }
+          batchOps++;
+          importedCount++;
+        }
+
+        if (batchOps > 0) {
+          await batch.commit();
+        }
+      }
+
+      return { ok: true, importedCount, skippedDuplicates };
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'giftLinks/importRecovered');
     }
   },
 };

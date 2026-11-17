@@ -79,32 +79,52 @@ export function PatientBoxView({
       setLoading(true);
       setErrorMsg(null);
       const cacheKey = `rt_hb_won_${targetToken.toUpperCase()}`;
+      let cachedParsed: BoxPublicResponse | null = null;
+      try {
+        const cached = window.localStorage.getItem(cacheKey);
+        if (cached) {
+          cachedParsed = JSON.parse(cached) as BoxPublicResponse;
+        }
+      } catch {
+        // ignore invalid cache
+      }
+
       try {
         const data = await apiClient.getBoxByToken(targetToken, encodedData);
         if (!data.ok || !data.box) {
-          try {
-            const cached = window.localStorage.getItem(cacheKey);
-            if (cached) {
-              setBox(JSON.parse(cached));
-              return;
-            }
-          } catch {
-            // ignore
+          if (cachedParsed) {
+            setBox(cachedParsed);
+            void apiClient.syncCachedBoxToCloud(cachedParsed);
+            return;
           }
           setBox(null);
           setErrorMsg(data.message || 'لم يتم العثور على رابط صندوق السعادة.');
+        } else if (
+          data.box.status === 'pending' &&
+          cachedParsed &&
+          (cachedParsed.status === 'opened' || cachedParsed.status === 'redeemed') &&
+          cachedParsed.prize
+        ) {
+          setBox(cachedParsed);
+          void apiClient.syncCachedBoxToCloud(cachedParsed);
         } else {
           setBox(data.box);
+          if (
+            (data.box.status === 'opened' || data.box.status === 'redeemed') &&
+            data.box.prize
+          ) {
+            try {
+              window.localStorage.setItem(cacheKey, JSON.stringify(data.box));
+            } catch {
+              // ignore storage errors
+            }
+          }
         }
       } catch {
-        try {
-          const cached = window.localStorage.getItem(cacheKey);
-          if (cached) {
-            setBox(JSON.parse(cached));
-            return;
-          }
-        } catch {
-          // ignore
+        if (cachedParsed) {
+          setBox(cachedParsed);
+          void apiClient.syncCachedBoxToCloud(cachedParsed);
+          return;
         }
         setErrorMsg('تعذر الاتصال بقاعدة البيانات، يرجى المحاولة مرة أخرى.');
       } finally {

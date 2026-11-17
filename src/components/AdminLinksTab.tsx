@@ -5,11 +5,13 @@ import {
   CheckCircle2,
   Clock,
   Copy,
+  Download,
   ExternalLink,
   FileSpreadsheet,
   Link2,
   MessageCircle,
   Plus,
+  RefreshCw,
   Save,
   Search,
   ShieldCheck,
@@ -17,6 +19,7 @@ import {
 } from 'lucide-react';
 import type { GiftLink, LabProfile, Prize } from '../types';
 import { apiClient } from '../services/apiClient';
+import { normalizeArabicDigits } from '../utils/phoneHash';
 import {
   buildAdminInviteText,
   buildAdminInviteWhatsAppUrl,
@@ -69,6 +72,22 @@ export function AdminLinksTab({
   const [apptTime, setApptTime] = useState('');
   const [apptNote, setApptNote] = useState('');
   const [savingAppt, setSavingAppt] = useState(false);
+
+  // Unsynced bookings recovery drawer state
+  const [showRecovery, setShowRecovery] = useState(false);
+  const [recoveryMode, setRecoveryMode] = useState<'whatsapp' | 'manual'>('whatsapp');
+  const [recoveryText, setRecoveryText] = useState('');
+  const [recoveryFallbackPhone, setRecoveryFallbackPhone] = useState('');
+  const [recoveryBranch, setRecoveryBranch] = useState(labProfile.branches[0] || '');
+  const [recoveryStatus, setRecoveryStatus] = useState<'opened' | 'redeemed'>('opened');
+  const [importingRecovery, setImportingRecovery] = useState(false);
+  const [syncingList, setSyncingList] = useState(false);
+
+  // Manual single recovery state
+  const [manualName, setManualName] = useState('');
+  const [manualPhone, setManualPhone] = useState('');
+  const [manualPrizeTitle, setManualPrizeTitle] = useState(prizes[0]?.title || '');
+  const [manualPrizeCode, setManualPrizeCode] = useState('');
 
   const publicBase =
     shareBaseUrl || (typeof window !== 'undefined' ? window.location.origin : '');
@@ -177,6 +196,147 @@ export function AdminLinksTab({
       onNotify('تعذر حفظ الموعد في قاعدة البيانات.', true);
     } finally {
       setSavingAppt(false);
+    }
+  };
+
+  const parsedWhatsAppBookings = useMemo(() => {
+    const raw = recoveryText.trim();
+    if (!raw) return [];
+
+    // Split multiple pasted WhatsApp messages reliably
+    const blocks = raw
+      .split(/(?=مرحباً\s)|(?=الاسم\s*[:：])|\n{2,}/g)
+      .reduce<string[]>((acc, chunk) => {
+        const trimmed = chunk.trim();
+        if (!trimmed) return acc;
+        // Merge standalone "الاسم:" chunk with preceding "مرحباً" header if they got separated right after مرحباً
+        if (
+          acc.length > 0 &&
+          /^مرحباً/i.test(acc[acc.length - 1]) &&
+          !/الاسم\s*[:：]/.test(acc[acc.length - 1]) &&
+          /^الاسم\s*[:：]/.test(trimmed)
+        ) {
+          acc[acc.length - 1] = `${acc[acc.length - 1]}\n${trimmed}`;
+        } else {
+          acc.push(trimmed);
+        }
+        return acc;
+      }, []);
+
+    const results: Array<{
+      clientName: string;
+      clientPhone?: string;
+      prizeTitle: string;
+      discountLabel?: string;
+      prizeCode?: string;
+      branchName?: string;
+      status: 'opened' | 'redeemed';
+    }> = [];
+
+    for (const block of blocks) {
+      const nameMatch = block.match(/الاسم\s*[:：]\s*(.+)/);
+      const prizeMatch = block.match(/الجائزة\s*[:：]\s*(.+)/);
+      const codeMatch =
+        block.match(/كود الجائزة\s*[:：]\s*([A-Za-z0-9_-]+)/i) ||
+        block.match(/\b(RTWIN-[A-Za-z0-9]+)\b/i);
+
+      const asciiBlock = normalizeArabicDigits(block);
+      const phoneMatch = asciiBlock.match(/(?:\+?2)?(01[0-25]\d{8})/);
+
+      if (!nameMatch && !prizeMatch && !codeMatch) continue;
+
+      let prizeTitle = (prizeMatch?.[1] || '').trim();
+      let discountLabel: string | undefined;
+      const parenMatch = prizeTitle.match(/^(.*?)\s*\(([^()]+)\)\s*$/);
+      if (parenMatch) {
+        prizeTitle = parenMatch[1].trim();
+        discountLabel = parenMatch[2].trim();
+      }
+      if (!prizeTitle) {
+        prizeTitle = prizes[0]?.title || 'جائزة صندوق السعادة';
+      }
+
+      results.push({
+        clientName: (nameMatch?.[1] || 'مريض مستعاد').trim(),
+        clientPhone: phoneMatch ? phoneMatch[1] : undefined,
+        prizeTitle,
+        discountLabel,
+        prizeCode: codeMatch?.[1]?.trim().toUpperCase(),
+        branchName: recoveryBranch || labProfile.branches[0],
+        status: recoveryStatus,
+      });
+    }
+
+    if (results.length === 1 && !results[0].clientPhone && recoveryFallbackPhone.trim()) {
+      results[0].clientPhone = recoveryFallbackPhone.trim();
+    }
+
+    return results;
+  }, [recoveryText, recoveryFallbackPhone, recoveryBranch, recoveryStatus, prizes, labProfile.branches]);
+
+  const handleImportWhatsAppBookings = async () => {
+    if (importingRecovery || parsedWhatsAppBookings.length === 0) return;
+    setImportingRecovery(true);
+    try {
+      const res = await apiClient.importRecoveredBookings(parsedWhatsAppBookings, links, prizes);
+      await onRefresh();
+      setRecoveryText('');
+      setRecoveryFallbackPhone('');
+      onNotify(
+        `تم جلب وتفعيل ${res.importedCount} حجز في البرنامج${
+          res.skippedDuplicates > 0 ? ` (وتخطي ${res.skippedDuplicates} مكرر بالكود)` : ''
+        }.`
+      );
+    } catch {
+      onNotify('تعذر حفظ الحجوزات المستعادة في قاعدة البيانات.', true);
+    } finally {
+      setImportingRecovery(false);
+    }
+  };
+
+  const handleManualRecoverySubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (importingRecovery || !manualName.trim() || !manualPrizeTitle.trim()) return;
+    setImportingRecovery(true);
+    try {
+      const res = await apiClient.importRecoveredBookings(
+        [
+          {
+            clientName: manualName.trim(),
+            clientPhone: manualPhone.trim(),
+            prizeTitle: manualPrizeTitle.trim(),
+            prizeCode: manualPrizeCode.trim() || undefined,
+            branchName: recoveryBranch || labProfile.branches[0],
+            status: recoveryStatus,
+          },
+        ],
+        links,
+        prizes
+      );
+      await onRefresh();
+      setManualName('');
+      setManualPhone('');
+      setManualPrizeCode('');
+      onNotify(
+        res.importedCount > 0
+          ? 'تم تسجيل وتفعيل الحجز غير المسمّع بنجاح في السجل.'
+          : 'هذا الكود مسجل بالفعل في النظام.'
+      );
+    } catch {
+      onNotify('تعذر تسجيل الحجز في السحابة.', true);
+    } finally {
+      setImportingRecovery(false);
+    }
+  };
+
+  const handleManualCloudSync = async () => {
+    if (syncingList) return;
+    setSyncingList(true);
+    try {
+      await onRefresh();
+      onNotify('تم تحديث وجلب كافة السجلات من السحابة.');
+    } finally {
+      setSyncingList(false);
     }
   };
 
@@ -422,6 +582,197 @@ export function AdminLinksTab({
         </section>
       </div>
 
+      {/* Unsynced Bookings Recovery Drawer (WhatsApp / Manual) */}
+      <section className="rounded-2xl border border-amber-200 bg-amber-50/40 p-5 sm:p-6">
+        <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+          <div>
+            <h2 className="text-base font-extrabold text-slate-900">
+              جلب وتفعيل الحجوزات غير المسمّعة في البرنامج
+            </h2>
+            <p className="text-xs text-slate-600">
+              إذا وصلتك رسائل جوائز من المرضى على واتساب المعمل ولم تظهر في السجل، الصق رسائل الواتساب هنا (رسالة واحدة أو عدة رسائل معاً) أو أضف الحجز يدوياً لتفعيله وحفظه فوراً.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowRecovery((v) => !v)}
+            className="inline-flex min-h-[42px] shrink-0 items-center gap-1.5 rounded-xl bg-amber-600 px-4 py-2 text-xs font-extrabold text-white shadow-xs transition-colors hover:bg-amber-700 cursor-pointer whitespace-nowrap"
+          >
+            <Download className="h-4 w-4" />
+            <span>{showRecovery ? 'إغلاق أداة الجلب' : 'جلب وتفعيل الحجوزات (واتساب / يدوي)'}</span>
+          </button>
+        </div>
+
+        {showRecovery ? (
+          <div className="mt-4 space-y-4 border-t border-amber-200/80 pt-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setRecoveryMode('whatsapp')}
+                className={`rounded-xl px-3.5 py-2 text-xs font-extrabold transition-colors cursor-pointer ${
+                  recoveryMode === 'whatsapp'
+                    ? 'bg-teal-700 text-white'
+                    : 'border border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                }`}
+              >
+                لصق رسائل الواتساب (تلقائي)
+              </button>
+              <button
+                type="button"
+                onClick={() => setRecoveryMode('manual')}
+                className={`rounded-xl px-3.5 py-2 text-xs font-extrabold transition-colors cursor-pointer ${
+                  recoveryMode === 'manual'
+                    ? 'bg-teal-700 text-white'
+                    : 'border border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                }`}
+              >
+                إدخال حجز سريع يدوياً
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <div>
+                <label className="mb-1 block text-xs font-bold text-slate-700">الفرع</label>
+                <select
+                  value={recoveryBranch}
+                  onChange={(e) => setRecoveryBranch(e.target.value)}
+                  className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 focus:border-teal-700 focus:outline-none"
+                >
+                  {labProfile.branches.map((br) => (
+                    <option key={br} value={br}>
+                      {br}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-bold text-slate-700">حالة التفعيل</label>
+                <select
+                  value={recoveryStatus}
+                  onChange={(e) => setRecoveryStatus(e.target.value as 'opened' | 'redeemed')}
+                  className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 focus:border-teal-700 focus:outline-none"
+                >
+                  <option value="opened">كسب — مفعّل وبانتظار الصرف بالمعمل</option>
+                  <option value="redeemed">تم الصرف بالمعمل بالفعل</option>
+                </select>
+              </div>
+              {recoveryMode === 'whatsapp' ? (
+                <div>
+                  <label className="mb-1 block text-xs font-bold text-slate-700">
+                    رقم الموبايل (إذا لم يذكر داخل رسالة واحدة)
+                  </label>
+                  <input
+                    type="tel"
+                    dir="ltr"
+                    value={recoveryFallbackPhone}
+                    onChange={(e) => setRecoveryFallbackPhone(e.target.value)}
+                    placeholder="010xxxxxxxx"
+                    className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-left font-mono text-xs text-slate-900 focus:border-teal-700 focus:outline-none"
+                  />
+                </div>
+              ) : null}
+            </div>
+
+            {recoveryMode === 'whatsapp' ? (
+              <div className="space-y-3">
+                <textarea
+                  rows={5}
+                  value={recoveryText}
+                  onChange={(e) => setRecoveryText(e.target.value)}
+                  placeholder={`الصق هنا رسالة أو عدة رسائل وصلتك على واتساب من المرضى مثل:\nالاسم: أحمد محمد\nالجائزة: تحليل CBC مجاناً (مجاناً 100%)\nكود الجائزة: RTWIN-AB12CD`}
+                  className="w-full rounded-xl border border-slate-300 bg-white p-3 text-xs leading-relaxed text-slate-900 focus:border-teal-700 focus:outline-none"
+                />
+                <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+                  <div className="text-xs font-bold text-slate-700">
+                    {parsedWhatsAppBookings.length > 0 ? (
+                      <span className="text-teal-800">
+                        تم رصد {parsedWhatsAppBookings.length} حجز جاهز للجلب والتفعيل:{' '}
+                        {parsedWhatsAppBookings
+                          .slice(0, 3)
+                          .map((b) => `${b.clientName} (${b.prizeCode || 'كود تلقائي'})`)
+                          .join(' · ')}
+                        {parsedWhatsAppBookings.length > 3 ? ' ...' : ''}
+                      </span>
+                    ) : (
+                      <span className="text-slate-500">
+                        الصق نص الرسائل ليتم تحليل الأسماء والأكواد والجوائز تلقائياً.
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    disabled={importingRecovery || parsedWhatsAppBookings.length === 0}
+                    onClick={() => void handleImportWhatsAppBookings()}
+                    className="inline-flex min-h-[42px] shrink-0 items-center justify-center gap-1.5 rounded-xl bg-teal-700 px-5 py-2 text-xs font-extrabold text-white hover:bg-teal-800 disabled:opacity-50 cursor-pointer whitespace-nowrap"
+                  >
+                    <CheckCircle2 className="h-4 w-4" />
+                    <span>
+                      {importingRecovery
+                        ? 'جاري الجلب والتفعيل...'
+                        : `جلب وتفعيل في البرنامج (${parsedWhatsAppBookings.length})`}
+                    </span>
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <form
+                onSubmit={handleManualRecoverySubmit}
+                className="grid grid-cols-1 gap-3 sm:grid-cols-12"
+              >
+                <input
+                  type="text"
+                  required
+                  value={manualName}
+                  onChange={(e) => setManualName(e.target.value)}
+                  placeholder="اسم المريض *"
+                  className="sm:col-span-3 rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs focus:border-teal-700 focus:outline-none"
+                />
+                <input
+                  type="tel"
+                  dir="ltr"
+                  value={manualPhone}
+                  onChange={(e) => setManualPhone(e.target.value)}
+                  placeholder="010xxxxxxxx"
+                  className="sm:col-span-2 rounded-xl border border-slate-300 bg-white px-3 py-2 text-left font-mono text-xs focus:border-teal-700 focus:outline-none"
+                />
+                <input
+                  type="text"
+                  list="rt-prizes-datalist"
+                  required
+                  value={manualPrizeTitle}
+                  onChange={(e) => setManualPrizeTitle(e.target.value)}
+                  placeholder="اختر أو اكتب اسم الجائزة *"
+                  className="sm:col-span-4 rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs focus:border-teal-700 focus:outline-none"
+                />
+                <datalist id="rt-prizes-datalist">
+                  {prizes.map((p) => (
+                    <option key={p.id} value={p.title} />
+                  ))}
+                </datalist>
+                <input
+                  type="text"
+                  dir="ltr"
+                  value={manualPrizeCode}
+                  onChange={(e) => setManualPrizeCode(e.target.value)}
+                  placeholder="كود الجائزة (اختياري)"
+                  className="sm:col-span-3 rounded-xl border border-slate-300 bg-white px-3 py-2 text-left font-mono text-xs uppercase focus:border-teal-700 focus:outline-none"
+                />
+                <div className="sm:col-span-12 flex justify-end">
+                  <button
+                    type="submit"
+                    disabled={importingRecovery}
+                    className="inline-flex min-h-[42px] items-center gap-1.5 rounded-xl bg-teal-700 px-5 py-2 text-xs font-extrabold text-white hover:bg-teal-800 disabled:opacity-60 cursor-pointer"
+                  >
+                    <CheckCircle2 className="h-4 w-4" />
+                    <span>{importingRecovery ? 'جاري التفعيل...' : 'إضافة وتفعيل الحجز الآن'}</span>
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
+        ) : null}
+      </section>
+
       {/* Patient Links & Winners List */}
       <section className="rounded-2xl border border-slate-200 bg-white p-5 sm:p-6">
         <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -434,6 +785,15 @@ export function AdminLinksTab({
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={syncingList}
+              onClick={() => void handleManualCloudSync()}
+              className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl border border-teal-200 bg-teal-50 px-3 py-1.5 text-xs font-bold text-teal-900 hover:bg-teal-100 disabled:opacity-60 cursor-pointer whitespace-nowrap"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${syncingList ? 'animate-spin' : ''}`} />
+              <span>{syncingList ? 'جاري الجلب...' : 'مزامنة السحابة'}</span>
+            </button>
             <div className="relative min-w-[210px] flex-1 sm:flex-initial">
               <Search className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
               <input
