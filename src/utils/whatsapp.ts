@@ -498,3 +498,162 @@ export function exportLinksExcelCsv(links: GiftLink[]): void {
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
 }
+
+export interface ParsedRecoveredBooking {
+  clientName: string;
+  clientPhone?: string;
+  prizeTitle: string;
+  discountLabel?: string;
+  prizeCode?: string;
+  boxToken?: string;
+  branchName?: string;
+  openedAt?: string;
+  expiresAt?: string;
+  visitRef?: string;
+  validHours?: number;
+  status: 'opened' | 'redeemed';
+}
+
+export function parseWhatsAppBookingsText(
+  rawText: string,
+  options?: {
+    defaultBranch?: string;
+    defaultPrizeTitle?: string;
+    defaultStatus?: 'opened' | 'redeemed';
+    fallbackSinglePhone?: string;
+  }
+): ParsedRecoveredBooking[] {
+  const raw = String(rawText || '')
+    .replace(/[\u200e\u200f\u202a-\u202e\ufeff]/g, '')
+    .trim();
+  if (!raw) return [];
+
+  const defaultBranch = options?.defaultBranch || 'الفرع الرئيسي - شبرا الخيمة';
+  const defaultPrizeTitle = options?.defaultPrizeTitle || 'جائزة صندوق الفرحة';
+  const defaultStatus = options?.defaultStatus || 'opened';
+
+  const lines = raw.split(/\r?\n/);
+  const blocks: string[] = [];
+  let currentLines: string[] = [];
+
+  const isWaHeaderLine = (line: string) =>
+    /^\[?\d{1,4}[/.-]\d{1,4}(?:[/.-]\d{2,4})?,?\s+\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APMapmصم]{1,2})?\]?(?:\s*-\s*|\s+).+?:/.test(
+      line.trim()
+    );
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const startsNewByHeader = isWaHeaderLine(trimmed);
+    const startsNewByGreeting =
+      /^مرحباً\s/i.test(trimmed) &&
+      currentLines.some((l) => /الاسم\s*[:：]|الجائزة\s*[:：]|RTWIN-|RTBOX-/i.test(l));
+    const startsNewByName =
+      /^الاسم\s*[:：]/.test(trimmed) &&
+      currentLines.some((l) => /الاسم\s*[:：]/.test(l)) &&
+      /الجائزة\s*[:：]|RTWIN-|RTBOX-/i.test(currentLines.join('\n'));
+
+    if ((startsNewByHeader || startsNewByGreeting || startsNewByName) && currentLines.length > 0) {
+      blocks.push(currentLines.join('\n'));
+      currentLines = [line];
+    } else {
+      currentLines.push(line);
+    }
+  }
+  if (currentLines.length > 0) {
+    blocks.push(currentLines.join('\n'));
+  }
+
+  const seenKeys = new Set<string>();
+  const results: ParsedRecoveredBooking[] = [];
+
+  const pushUnique = (item: ParsedRecoveredBooking) => {
+    const dedupeKey = item.boxToken
+      ? `T:${item.boxToken.toUpperCase()}`
+      : item.prizeCode
+        ? `C:${item.prizeCode.toUpperCase()}`
+        : `N:${item.clientName}|${item.clientPhone || ''}|${item.prizeTitle}`;
+    if (seenKeys.has(dedupeKey)) {
+      const existing = results.find(
+        (r) =>
+          (item.boxToken && r.boxToken?.toUpperCase() === item.boxToken.toUpperCase()) ||
+          (item.prizeCode && r.prizeCode?.toUpperCase() === item.prizeCode.toUpperCase())
+      );
+      if (existing) {
+        if (!existing.clientPhone && item.clientPhone) existing.clientPhone = item.clientPhone;
+        if (!existing.prizeCode && item.prizeCode) existing.prizeCode = item.prizeCode;
+        if (!existing.boxToken && item.boxToken) existing.boxToken = item.boxToken;
+      }
+      return;
+    }
+    seenKeys.add(dedupeKey);
+    results.push(item);
+  };
+
+  for (const block of blocks) {
+    const compactDigitsBlock = normalizeArabicDigits(block).replace(/[\s\-().\u00a0]+/g, '');
+    const phoneMatch = compactDigitsBlock.match(/(?:\+?20?|0020?)?(01[0125]\d{8})/);
+
+    const activateParamMatch = block.match(/[?&]activate=([A-Za-z0-9_-]+)/);
+    if (activateParamMatch) {
+      const decodedAct = decodeAdminActivationPayload(activateParamMatch[1]);
+      if (decodedAct) {
+        pushUnique({
+          clientName: decodedAct.clientName,
+          clientPhone: decodedAct.clientPhone || (phoneMatch ? phoneMatch[1] : undefined),
+          prizeTitle: decodedAct.prizeTitle,
+          discountLabel: decodedAct.discountLabel,
+          prizeCode: decodedAct.prizeCode,
+          boxToken: decodedAct.token,
+          branchName: decodedAct.branchName || defaultBranch,
+          openedAt: decodedAct.openedAt,
+          expiresAt: decodedAct.expiresAt,
+          visitRef: decodedAct.visitRef,
+          validHours: decodedAct.validHours,
+          status: defaultStatus,
+        });
+        continue;
+      }
+    }
+
+    const nameMatch = block.match(/الاسم\s*[:：]\s*(.+)/);
+    const prizeMatch = block.match(/الجائزة\s*[:：]\s*(.+)/);
+    const branchMatch = block.match(/الفرع\s*[:：]\s*(.+)/);
+    const codeMatch =
+      block.match(/كود الجائزة\s*[:：]\s*([A-Za-z0-9_-]+)/i) ||
+      block.match(/\b(RTWIN-[A-Za-z0-9]+)\b/i);
+    const boxTokenMatch =
+      block.match(/رقم الصندوق\s*[:：]\s*([A-Za-z0-9_-]+)/i) ||
+      block.match(/\b(RTBOX-[A-Za-z0-9]+)\b/i);
+
+    if (!nameMatch && !prizeMatch && !codeMatch && !boxTokenMatch) continue;
+
+    let prizeTitle = (prizeMatch?.[1] || '').trim();
+    let discountLabel: string | undefined;
+    const parenMatch = prizeTitle.match(/^(.*?)\s*\(([^()]+)\)\s*$/);
+    if (parenMatch) {
+      prizeTitle = parenMatch[1].trim();
+      discountLabel = parenMatch[2].trim();
+    }
+    if (!prizeTitle) {
+      prizeTitle = defaultPrizeTitle;
+    }
+
+    pushUnique({
+      clientName: (nameMatch?.[1] || 'مريض مستعاد').trim(),
+      clientPhone: phoneMatch ? phoneMatch[1] : undefined,
+      prizeTitle,
+      discountLabel,
+      prizeCode: codeMatch?.[1]?.trim().toUpperCase(),
+      boxToken: boxTokenMatch?.[1]?.trim().toUpperCase(),
+      branchName: branchMatch?.[1]?.trim() || defaultBranch,
+      status: defaultStatus,
+    });
+  }
+
+  if (results.length === 1 && !results[0].clientPhone && options?.fallbackSinglePhone?.trim()) {
+    results[0].clientPhone = options.fallbackSinglePhone.trim();
+  }
+
+  return results;
+}
+

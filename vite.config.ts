@@ -72,6 +72,15 @@ export default defineConfig(() => {
               icons: [{ src: 'pwa-192x192.png', sizes: '192x192', type: 'image/png' }],
             },
           ],
+          share_target: {
+            action: `${base}?view=admin`,
+            method: 'GET',
+            params: {
+              title: 'share_title',
+              text: 'share_text',
+              url: 'share_url',
+            },
+          },
         },
         workbox: {
           maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,

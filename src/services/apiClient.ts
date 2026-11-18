@@ -197,18 +197,43 @@ async function commitGiftLinkViaRest(writes: Array<Record<string, unknown>>): Pr
 }
 
 async function verifyGiftLinkExistsOnServer(token: string): Promise<boolean> {
+  const status = await getGiftLinkStatusFromServerDirect(token);
+  return status.exists;
+}
+
+async function getGiftLinkStatusFromServerDirect(token: string): Promise<{
+  reachable: boolean;
+  exists: boolean;
+  status?: string;
+}> {
   try {
-    const snap = await withCommitTimeout(getDocFromServer(doc(db, 'giftLinks', token)), 2500);
-    if (snap.exists()) return true;
+    const snap = await withCommitTimeout(getDocFromServer(doc(db, 'giftLinks', token)), 2000);
+    if (snap.exists()) {
+      return { reachable: true, exists: true, status: String(snap.data().status || '') };
+    }
+    return { reachable: true, exists: false };
   } catch {
-    // fallback to REST check
+    // fallback to direct HTTPS REST GET (bypasses IndexedDB cache completely)
   }
   try {
     const url = `${getFirestoreRestBaseUrl()}/giftLinks/${encodeURIComponent(token)}?key=${encodeURIComponent(FIREBASE_API_KEY)}`;
-    const res = await fetch(url, { method: 'GET' });
-    return res.ok;
+    const res = await fetch(url, { method: 'GET', cache: 'no-store' });
+    if (res.status === 404) {
+      return { reachable: true, exists: false };
+    }
+    if (res.ok) {
+      const json = (await res.json().catch(() => null)) as {
+        fields?: { status?: { stringValue?: string } };
+      } | null;
+      return {
+        reachable: true,
+        exists: true,
+        status: json?.fields?.status?.stringValue || '',
+      };
+    }
+    return { reachable: false, exists: false };
   } catch {
-    return false;
+    return { reachable: false, exists: false };
   }
 }
 
@@ -1061,13 +1086,13 @@ export const apiClient = {
       return { ok: false, message: 'تم حذف هذا السجل أو إلغاؤه من قِبل إدارة المعمل.' };
     }
     try {
-      const delSnap = await getDoc(doc(db, 'deletedLinks', clean));
+      const delSnap = await withCommitTimeout(getDocFromServer(doc(db, 'deletedLinks', clean)), 1800);
       if (delSnap.exists()) {
         addDeletedTokensLocally([clean]);
         return { ok: false, message: 'تم حذف هذا السجل أو إلغاؤه من قِبل إدارة المعمل.' };
       }
     } catch {
-      // continue offline
+      // continue offline or if unavailable
     }
 
     const cachedExisting = loadCachedBox(clean);
@@ -1079,9 +1104,13 @@ export const apiClient = {
     const linkRef = doc(db, 'giftLinks', clean);
     let existingSnap = null;
     try {
-      existingSnap = await getDoc(linkRef);
+      existingSnap = await withCommitTimeout(getDocFromServer(linkRef), 2200);
     } catch {
-      existingSnap = null;
+      try {
+        existingSnap = await withCommitTimeout(getDoc(linkRef), 1200);
+      } catch {
+        existingSnap = null;
+      }
     }
 
     const checkActivePhoneLock = async (phoneHash: string): Promise<{
@@ -1090,12 +1119,16 @@ export const apiClient = {
     }> => {
       if (!phoneHash) return { locked: false };
       try {
-        const lockSnap = await getDoc(doc(db, 'phoneLocks', phoneHash));
+        const lockSnap = await withCommitTimeout(getDocFromServer(doc(db, 'phoneLocks', phoneHash)), 2000).catch(() =>
+          withCommitTimeout(getDoc(doc(db, 'phoneLocks', phoneHash)), 1200)
+        );
         if (!lockSnap.exists()) return { locked: false };
         const lockData = lockSnap.data();
         const activeToken = normalizeId(String(lockData.activeToken || ''));
         if (!activeToken) return { locked: false };
-        const activeSnap = await getDoc(doc(db, 'giftLinks', activeToken));
+        const activeSnap = await withCommitTimeout(getDocFromServer(doc(db, 'giftLinks', activeToken)), 2000).catch(() =>
+          withCommitTimeout(getDoc(doc(db, 'giftLinks', activeToken)), 1200)
+        );
         if (!activeSnap.exists()) return { locked: false };
         const activeLink = docToGiftLink(activeSnap.id, activeSnap.data());
         const expiresMs = new Date(activeLink.expiresAt).getTime();
@@ -1242,7 +1275,7 @@ export const apiClient = {
 
       let cloudSynced = false;
       try {
-        await withCommitTimeout(batch.commit(), 3000);
+        await withCommitTimeout(batch.commit(), 1800);
         cloudSynced = true;
       } catch (err) {
         console.warn('Primary openBox update batch failed, trying HTTPS REST commit immediately:', err);
@@ -1260,11 +1293,23 @@ export const apiClient = {
                 ...updateFields,
                 updatedAt: serverTimestamp(),
               }),
-              3000
+              2000
             );
             cloudSynced = true;
           } catch (retryErr) {
             console.warn('All openBox update transports deferred to sync queue:', retryErr);
+            enqueueOfflineMutation('open_box', { box: outBox, clientPhone: decoded?.p || '' });
+          }
+        }
+      }
+
+      if (cloudSynced) {
+        const serverState = await getGiftLinkStatusFromServerDirect(clean);
+        if (serverState.reachable && serverState.exists && serverState.status === 'pending') {
+          try {
+            await restUpdateGiftLinkToOpened(clean, updateFields);
+          } catch {
+            cloudSynced = false;
             enqueueOfflineMutation('open_box', { box: outBox, clientPhone: decoded?.p || '' });
           }
         }
@@ -1402,7 +1447,7 @@ export const apiClient = {
 
     let cloudSynced = false;
     try {
-      await withCommitTimeout(batch.commit(), 3000);
+      await withCommitTimeout(batch.commit(), 1800);
       cloudSynced = true;
     } catch (err) {
       console.warn('Primary openBox create batch failed, trying HTTPS REST commit immediately:', err);
@@ -1426,7 +1471,7 @@ export const apiClient = {
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
           });
-          await withCommitTimeout(fallbackBatch.commit(), 3000);
+          await withCommitTimeout(fallbackBatch.commit(), 2000);
           cloudSynced = true;
         } catch (retryErr) {
           console.warn('All openBox create transports deferred to sync queue:', retryErr);
@@ -1441,7 +1486,8 @@ export const apiClient = {
         try {
           await restCreateGiftLinkAndContact(clean, baseCreateFields, clientPhone);
         } catch {
-          // already committed via SDK or queued
+          cloudSynced = false;
+          enqueueOfflineMutation('open_box', { box: outBox, clientPhone });
         }
       }
     }
@@ -1467,12 +1513,16 @@ export const apiClient = {
     const phoneHash = await hashPhoneNumber(canonicalPhone);
     if (phoneHash && (typeof navigator === 'undefined' || navigator.onLine)) {
       try {
-        const lockSnap = await withCommitTimeout(getDoc(doc(db, 'phoneLocks', phoneHash)), 2500);
+        const lockSnap = await withCommitTimeout(getDocFromServer(doc(db, 'phoneLocks', phoneHash)), 2000).catch(() =>
+          withCommitTimeout(getDoc(doc(db, 'phoneLocks', phoneHash)), 1200)
+        );
         if (lockSnap.exists()) {
           const lockData = lockSnap.data();
           const activeToken = normalizeId(String(lockData.activeToken || ''));
           if (activeToken) {
-            const activeSnap = await getDoc(doc(db, 'giftLinks', activeToken));
+            const activeSnap = await withCommitTimeout(getDocFromServer(doc(db, 'giftLinks', activeToken)), 2000).catch(
+              () => withCommitTimeout(getDoc(doc(db, 'giftLinks', activeToken)), 1200)
+            );
             if (activeSnap.exists()) {
               const activeLink = docToGiftLink(activeSnap.id, activeSnap.data(), canonicalPhone);
               const expiresMs = new Date(activeLink.expiresAt).getTime();
@@ -1617,7 +1667,7 @@ export const apiClient = {
 
     let cloudSynced = false;
     try {
-      await withCommitTimeout(batch.commit(), 3000);
+      await withCommitTimeout(batch.commit(), 1800);
       cloudSynced = true;
     } catch (err) {
       console.warn('Primary self-box batch commit failed, trying HTTPS REST commit immediately:', err);
@@ -1633,7 +1683,7 @@ export const apiClient = {
           const fallbackBatch = writeBatch(db);
           fallbackBatch.set(doc(db, 'giftLinks', token), docPayload);
           fallbackBatch.set(doc(db, 'giftLinks', token, 'private', 'contact'), contactPayload);
-          await withCommitTimeout(fallbackBatch.commit(), 3000);
+          await withCommitTimeout(fallbackBatch.commit(), 2000);
           cloudSynced = true;
         } catch (retryErr) {
           console.warn('All self-box commit transports deferred to sync queue:', retryErr);
@@ -1648,7 +1698,8 @@ export const apiClient = {
         try {
           await restCreateGiftLinkAndContact(token, baseDocFields, canonicalPhone);
         } catch {
-          // ignore if already present
+          cloudSynced = false;
+          enqueueOfflineMutation('open_box', { box: outBox, clientPhone: canonicalPhone });
         }
       }
     }
@@ -2744,18 +2795,25 @@ export const apiClient = {
       return false;
     }
     try {
-      const delSnap = await getDoc(doc(db, 'deletedLinks', clean));
-      if (delSnap.exists()) {
-        addDeletedTokensLocally([clean]);
-        return true;
-      }
-
-      const snap = await getDoc(doc(db, 'giftLinks', clean));
-      if (snap.exists()) {
-        const existing = snap.data();
-        if (existing.status === 'opened' || existing.status === 'redeemed' || existing.status === 'cancelled') {
+      try {
+        const delSnap = await withCommitTimeout(getDocFromServer(doc(db, 'deletedLinks', clean)), 1800);
+        if (delSnap.exists()) {
+          addDeletedTokensLocally([clean]);
           return true;
         }
+      } catch {
+        // continue if deletedLinks check times out
+      }
+
+      const serverState = await getGiftLinkStatusFromServerDirect(clean);
+      if (
+        serverState.reachable &&
+        serverState.exists &&
+        (serverState.status === 'opened' ||
+          serverState.status === 'redeemed' ||
+          serverState.status === 'cancelled')
+      ) {
+        return true;
       }
 
       const validHours = Math.min(2160, Math.max(1, Number(cachedBox.prize.validHours || 48)));
@@ -2802,10 +2860,11 @@ export const apiClient = {
       };
       const canonicalPhone = normalizeCanonicalPhone(resolvedPhone);
       const phoneHash = canonicalPhone.length >= 8 ? await hashPhoneNumber(canonicalPhone) : '';
+      const safeClientName = String(cachedBox.clientName || '').trim() || 'عميلنا العزيز';
       const createFields: Record<string, unknown> = {
         id: clean,
         token: clean,
-        clientName: String(cachedBox.clientName || 'عميلنا العزيز').slice(0, 120),
+        clientName: safeClientName.slice(0, 120),
         visitRef: String(cachedBox.visitRef || `RT-${Math.floor(1000 + Math.random() * 9000)}`).slice(0, 64),
         branchName: String(cachedBox.branchName || DEFAULT_LAB_PROFILE.branches[0]).slice(0, 160),
         ...(phoneHash ? { phoneHash } : {}),
@@ -2838,7 +2897,8 @@ export const apiClient = {
         validHours,
       };
 
-      if (snap.exists()) {
+      const existsPendingOnServer = serverState.reachable && serverState.exists;
+      if (existsPendingOnServer) {
         batch.update(doc(db, 'giftLinks', clean), {
           ...updateFields,
           updatedAt: serverTimestamp(),
@@ -2857,14 +2917,27 @@ export const apiClient = {
       }
 
       try {
-        await withCommitTimeout(batch.commit());
+        await withCommitTimeout(batch.commit(), 1800);
       } catch (sdkErr) {
         console.warn('SDK syncCachedBoxToCloud failed, trying HTTPS REST commit:', clean, sdkErr);
-        if (snap.exists()) {
+        if (existsPendingOnServer) {
           await restUpdateGiftLinkToOpened(clean, updateFields);
         } else {
           await restCreateGiftLinkAndContact(clean, createFields, canonicalPhone || '');
         }
+      }
+
+      const verifyAfter = await getGiftLinkStatusFromServerDirect(clean);
+      if (verifyAfter.reachable && (!verifyAfter.exists || verifyAfter.status === 'pending')) {
+        if (verifyAfter.exists) {
+          await restUpdateGiftLinkToOpened(clean, updateFields);
+        } else {
+          await restCreateGiftLinkAndContact(clean, createFields, canonicalPhone || '');
+        }
+      }
+
+      if (phoneHash) {
+        void restUpsertPhoneLockBestEffort(phoneHash, clean, expiresAt, validHours);
       }
       return true;
     } catch (err) {
@@ -2921,7 +2994,10 @@ export const apiClient = {
       getDocsFromServer(collection(db, 'deletedLinks')).catch(() => null),
     ]);
     let linksSnap = initialLinksSnap;
-    const existingIds = new Set(linksSnap.docs.map((d) => d.id));
+    const serverStatusById = new Map<string, string>();
+    for (const d of linksSnap.docs) {
+      serverStatusById.set(d.id, String(d.data().status || 'pending'));
+    }
     const deletedIds = getDeletedTokensSet();
     if (deletedSnap) {
       const serverDeletedTokens = deletedSnap.docs.map((d) => d.id);
@@ -2937,15 +3013,32 @@ export const apiClient = {
         const localCandidates: Array<Record<string, unknown>> = [];
         for (let i = 0; i < window.localStorage.length; i++) {
           const key = window.localStorage.key(i);
-          if (!key || key === DELETED_TOKENS_STORAGE_KEY || key.startsWith('rt_hb_offline_')) continue;
-          if (key.startsWith('rt_hb_won_') || key.includes('giftLinks') || key.includes('happiness')) {
+          if (!key || key === DELETED_TOKENS_STORAGE_KEY) continue;
+          if (
+            key.startsWith('rt_hb_won_') ||
+            key.startsWith('rt_hb_offline_dashboard') ||
+            key.startsWith('rt_hb_offline_queue') ||
+            key.includes('giftLinks') ||
+            key.includes('happiness')
+          ) {
             const raw = window.localStorage.getItem(key);
             if (!raw) continue;
             try {
               const parsed = JSON.parse(raw);
               if (Array.isArray(parsed)) {
                 parsed.forEach((item) => {
-                  if (item && typeof item === 'object') localCandidates.push(item as Record<string, unknown>);
+                  if (!item || typeof item !== 'object') return;
+                  const obj = item as Record<string, unknown>;
+                  const nested = obj.payload as Record<string, unknown> | undefined;
+                  if (nested && (nested.box || nested.link)) {
+                    const boxOrLink = (nested.box || nested.link) as Record<string, unknown>;
+                    localCandidates.push({
+                      ...boxOrLink,
+                      clientPhone: boxOrLink.clientPhone || nested.clientPhone || '',
+                    });
+                  } else {
+                    localCandidates.push(obj);
+                  }
                 });
               } else if (parsed && typeof parsed === 'object') {
                 if (Array.isArray((parsed as Record<string, unknown>).giftLinks)) {
@@ -2964,17 +3057,27 @@ export const apiClient = {
 
         const toRecover = localCandidates.filter((c) => {
           const tok = normalizeId(String(c.token || c.id || ''));
-          return Boolean(tok && !existingIds.has(tok) && !deletedIds.has(tok) && (c.prize || c.prizeTitle));
+          if (!tok || deletedIds.has(tok) || !(c.prize || c.prizeTitle)) return false;
+          const serverStatus = serverStatusById.get(tok);
+          if (!serverStatus) return true;
+          const localStatus = String(c.status || '');
+          return serverStatus === 'pending' && (localStatus === 'opened' || localStatus === 'redeemed');
         });
 
         if (toRecover.length > 0) {
           for (let i = 0; i < toRecover.length; i += 100) {
             const chunk = toRecover.slice(i, i + 100);
             const batch = writeBatch(db);
+            let chunkOps = 0;
             for (const c of chunk) {
               const tok = normalizeId(String(c.token || c.id || ''));
-              if (!tok || existingIds.has(tok)) continue;
-              existingIds.add(tok);
+              if (!tok) continue;
+              const serverStatus = serverStatusById.get(tok);
+              const localStatus = String(c.status || 'opened');
+              if (serverStatus && !(serverStatus === 'pending' && (localStatus === 'opened' || localStatus === 'redeemed'))) {
+                continue;
+              }
+              serverStatusById.set(tok, localStatus === 'redeemed' ? 'redeemed' : 'opened');
               const prizeObj = (c.prize as Record<string, unknown> | undefined) || {};
               const title = String(c.prizeTitle || prizeObj.title || '').trim().slice(0, 200);
               if (!title) continue;
@@ -2984,46 +3087,78 @@ export const apiClient = {
               const expiresAt = String(
                 c.expiresAt || new Date(Date.now() + validHours * 3600_000).toISOString()
               ).slice(0, 64);
-              const phone = normalizeCanonicalPhone(String(c.clientPhone || ''));
+              let phone = normalizeCanonicalPhone(String(c.clientPhone || ''));
+              if (!phone) {
+                try {
+                  phone = normalizeCanonicalPhone(window.localStorage.getItem(`rt_hb_phone_${tok}`) || '');
+                } catch {
+                  // ignore
+                }
+              }
               const phoneHash = phone.length >= 8 ? await hashPhoneNumber(phone) : '';
               const prizeTerms = String(
                 c.prizeTerms || prizeObj.terms || buildDefaultPrizeTerms({ title, category, validHours })
               ).slice(0, 1000);
+              const resolvedStatus: LinkStatus =
+                localStatus === 'redeemed' ? 'redeemed' : localStatus === 'pending' ? 'pending' : 'opened';
+              const safeName = String(c.clientName || '').trim() || 'عميلنا العزيز';
 
-              batch.set(doc(db, 'giftLinks', tok), {
-                id: tok,
-                token: tok,
-                clientName: String(c.clientName || 'عميلنا العزيز').slice(0, 120),
-                visitRef: String(c.visitRef || `RT-${Math.floor(1000 + Math.random() * 9000)}`).slice(0, 64),
-                branchName: String(c.branchName || DEFAULT_LAB_PROFILE.branches[0]).slice(0, 160),
-                ...(phoneHash ? { phoneHash } : {}),
-                status: 'opened',
-                gameMode: c.gameMode || 'box',
-                createdAt: serverTimestamp(),
-                expiresAt,
-                openedAt,
-                redeemedAt: null,
-                redeemedBy: null,
-                appointmentAt: c.appointmentAt ? String(c.appointmentAt).slice(0, 120) : null,
-                appointmentNote: c.appointmentNote ? String(c.appointmentNote).slice(0, 300) : null,
-                prizeId: String(c.prizeId || 'prz_recovered').slice(0, 128),
-                prizeTitle: title,
-                prizeDescription: String(c.prizeDescription || prizeObj.description || title).slice(0, 600),
-                prizeTerms,
-                prizeDiscountLabel: String(c.prizeDiscountLabel || prizeObj.discountLabel || 'هدية خاصة').slice(0, 80),
-                prizeCategory: String(category).slice(0, 40),
-                prizeCode: String(c.prizeCode || prizeObj.prizeCode || randomCode('RTWIN-', 6)).slice(0, 64),
-                validHours,
-                updatedAt: serverTimestamp(),
-              });
-              batch.set(doc(db, 'giftLinks', tok, 'private', 'contact'), {
-                clientPhone: phone || '',
-                createdAt: serverTimestamp(),
-                updatedAt: serverTimestamp(),
-              });
+              if (serverStatus === 'pending') {
+                batch.update(doc(db, 'giftLinks', tok), {
+                  status: resolvedStatus,
+                  openedAt,
+                  expiresAt,
+                  redeemedAt: resolvedStatus === 'redeemed' ? String(c.redeemedAt || openedAt).slice(0, 64) : null,
+                  redeemedBy: resolvedStatus === 'redeemed' ? String(c.redeemedBy || 'مزامنة تلقائية').slice(0, 120) : null,
+                  prizeId: String(c.prizeId || 'prz_recovered').slice(0, 128),
+                  prizeTitle: title,
+                  prizeDescription: String(c.prizeDescription || prizeObj.description || title).slice(0, 600),
+                  prizeTerms,
+                  prizeDiscountLabel: String(c.prizeDiscountLabel || prizeObj.discountLabel || 'هدية خاصة').slice(0, 80),
+                  prizeCategory: String(category).slice(0, 40),
+                  prizeCode: String(c.prizeCode || prizeObj.prizeCode || randomCode('RTWIN-', 6)).slice(0, 64),
+                  validHours,
+                  updatedAt: serverTimestamp(),
+                });
+              } else {
+                batch.set(doc(db, 'giftLinks', tok), {
+                  id: tok,
+                  token: tok,
+                  clientName: safeName.slice(0, 120),
+                  visitRef: String(c.visitRef || `RT-${Math.floor(1000 + Math.random() * 9000)}`).slice(0, 64),
+                  branchName: String(c.branchName || DEFAULT_LAB_PROFILE.branches[0]).slice(0, 160),
+                  ...(phoneHash ? { phoneHash } : {}),
+                  status: resolvedStatus,
+                  gameMode: c.gameMode || 'box',
+                  createdAt: serverTimestamp(),
+                  expiresAt,
+                  openedAt: resolvedStatus === 'pending' ? null : openedAt,
+                  redeemedAt: resolvedStatus === 'redeemed' ? String(c.redeemedAt || openedAt).slice(0, 64) : null,
+                  redeemedBy: resolvedStatus === 'redeemed' ? String(c.redeemedBy || 'مزامنة تلقائية').slice(0, 120) : null,
+                  appointmentAt: c.appointmentAt ? String(c.appointmentAt).slice(0, 120) : null,
+                  appointmentNote: c.appointmentNote ? String(c.appointmentNote).slice(0, 300) : null,
+                  prizeId: String(c.prizeId || 'prz_recovered').slice(0, 128),
+                  prizeTitle: title,
+                  prizeDescription: String(c.prizeDescription || prizeObj.description || title).slice(0, 600),
+                  prizeTerms,
+                  prizeDiscountLabel: String(c.prizeDiscountLabel || prizeObj.discountLabel || 'هدية خاصة').slice(0, 80),
+                  prizeCategory: String(category).slice(0, 40),
+                  prizeCode: String(c.prizeCode || prizeObj.prizeCode || randomCode('RTWIN-', 6)).slice(0, 64),
+                  validHours,
+                  updatedAt: serverTimestamp(),
+                });
+                batch.set(doc(db, 'giftLinks', tok, 'private', 'contact'), {
+                  clientPhone: phone || '',
+                  createdAt: serverTimestamp(),
+                  updatedAt: serverTimestamp(),
+                });
+              }
+              chunkOps++;
               recoveredLocalCount++;
             }
-            await batch.commit();
+            if (chunkOps > 0) {
+              await batch.commit();
+            }
           }
           linksSnap = await getDocsFromServer(collection(db, 'giftLinks'));
         }
@@ -3201,8 +3336,38 @@ export const apiClient = {
             (codeUpper && activeByCode.get(codeUpper)) ||
             undefined;
 
+          const canonicalPhone = normalizeCanonicalPhone(String(item.clientPhone || '')).slice(0, 40);
+          const phoneHash = canonicalPhone.length >= 8 ? await hashPhoneNumber(canonicalPhone) : '';
+
           if (matchedExisting && matchedExisting.status !== 'pending') {
-            skippedDuplicates++;
+            if (canonicalPhone && !matchedExisting.clientPhone) {
+              const targetId = matchedExisting.id;
+              const contactRef = doc(db, 'giftLinks', targetId, 'private', 'contact');
+              const contactSnap = await getDoc(contactRef).catch(() => null);
+              if (contactSnap?.exists()) {
+                batch.update(contactRef, {
+                  clientPhone: canonicalPhone,
+                  updatedAt: serverTimestamp(),
+                });
+              } else {
+                batch.set(contactRef, {
+                  clientPhone: canonicalPhone,
+                  createdAt: serverTimestamp(),
+                  updatedAt: serverTimestamp(),
+                });
+              }
+              if (phoneHash && !matchedExisting.phoneHash) {
+                batch.update(doc(db, 'giftLinks', targetId), {
+                  phoneHash,
+                  updatedAt: serverTimestamp(),
+                });
+              }
+              matchedExisting.clientPhone = canonicalPhone;
+              upgradedCount++;
+              batchOps++;
+            } else {
+              skippedDuplicates++;
+            }
             continue;
           }
 
@@ -3237,8 +3402,6 @@ export const apiClient = {
             item.expiresAt && !Number.isNaN(new Date(item.expiresAt).getTime())
               ? item.expiresAt.slice(0, 64)
               : new Date(now + validHours * 3600_000).toISOString();
-          const canonicalPhone = normalizeCanonicalPhone(String(item.clientPhone || '')).slice(0, 40);
-          const phoneHash = canonicalPhone.length >= 8 ? await hashPhoneNumber(canonicalPhone) : '';
           const status = item.status === 'redeemed' ? 'redeemed' : 'opened';
           const prizeCode = (codeUpper || matchedExisting?.prizeCode || randomCode('RTWIN-', 6)).slice(0, 64);
 
@@ -3250,6 +3413,7 @@ export const apiClient = {
               expiresAt,
               redeemedAt: status === 'redeemed' ? openedAt : null,
               redeemedBy: status === 'redeemed' ? 'تفعيل من الإدارة' : null,
+              ...(phoneHash && !matchedExisting.phoneHash ? { phoneHash } : {}),
               prizeId: (matchedPrize?.id || matchedExisting.prizeId || 'prz_imported').slice(0, 128),
               prizeTitle: cleanPrizeTitle,
               prizeDescription: description,
@@ -3261,10 +3425,20 @@ export const apiClient = {
               updatedAt: serverTimestamp(),
             });
             if (canonicalPhone && !matchedExisting.clientPhone) {
-              batch.update(doc(db, 'giftLinks', targetId, 'private', 'contact'), {
-                clientPhone: canonicalPhone,
-                updatedAt: serverTimestamp(),
-              });
+              const contactRef = doc(db, 'giftLinks', targetId, 'private', 'contact');
+              const contactSnap = await getDoc(contactRef).catch(() => null);
+              if (contactSnap?.exists()) {
+                batch.update(contactRef, {
+                  clientPhone: canonicalPhone,
+                  updatedAt: serverTimestamp(),
+                });
+              } else {
+                batch.set(contactRef, {
+                  clientPhone: canonicalPhone,
+                  createdAt: serverTimestamp(),
+                  updatedAt: serverTimestamp(),
+                });
+              }
             }
             activeByToken.set(targetId.toUpperCase(), { ...matchedExisting, status });
             activeByCode.set(prizeCode.toUpperCase(), { ...matchedExisting, status });

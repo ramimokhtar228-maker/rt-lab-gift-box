@@ -4,6 +4,7 @@ import {
   CalendarClock,
   Check,
   CheckCircle2,
+  ClipboardPaste,
   Clock,
   Copy,
   Download,
@@ -22,18 +23,17 @@ import {
 import type { GameMode, GiftLink, LabProfile, LoyaltyTier, Prize } from '../types';
 import { GAME_MODE_META } from '../i18n/translations';
 import { apiClient } from '../services/apiClient';
-import { normalizeArabicDigits } from '../utils/phoneHash';
 import {
   buildAdminInviteText,
   buildAdminInviteWhatsAppUrl,
   buildAdminWinnerReplyWhatsAppUrl,
   buildBoxUrl,
   copyToClipboard,
-  decodeAdminActivationPayload,
   exportLinksExcelCsv,
   formatArabicDate,
   formatWhatsAppPhone,
   getTimeRemaining,
+  parseWhatsAppBookingsText,
 } from '../utils/whatsapp';
 
 const ALL_GAME_MODES: GameMode[] = ['box', 'three_boxes', 'wheel', 'scratch', 'secret', 'seasonal'];
@@ -244,170 +244,79 @@ export function AdminLinksTab({
     }
   };
 
-  const parsedWhatsAppBookings = useMemo(() => {
-    const raw = recoveryText.replace(/[\u200e\u200f\u202a-\u202e\ufeff]/g, '').trim();
-    if (!raw) return [];
+  const parsedWhatsAppBookings = useMemo(
+    () =>
+      parseWhatsAppBookingsText(recoveryText, {
+        defaultBranch: recoveryBranch || labProfile.branches[0],
+        defaultPrizeTitle: prizes[0]?.title,
+        defaultStatus: recoveryStatus,
+        fallbackSinglePhone: recoveryFallbackPhone,
+      }),
+    [recoveryText, recoveryFallbackPhone, recoveryBranch, recoveryStatus, prizes, labProfile.branches]
+  );
 
-    // Normalize WhatsApp copy-paste message headers so timestamp+sender stay attached to the following message
-    const lines = raw.split(/\r?\n/);
-    const blocks: string[] = [];
-    let currentLines: string[] = [];
-
-    const isWaHeaderLine = (line: string) =>
-      /^\[?\d{1,4}[/.-]\d{1,4}(?:[/.-]\d{2,4})?,?\s+\d{1,2}:\d{2}(?:\s*[APMapmصم]{1,2})?\]?(?:\s*-\s*|\s+).+?:/.test(
-        line.trim()
-      );
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      const startsNewByHeader = isWaHeaderLine(trimmed);
-      const startsNewByGreeting =
-        /^مرحباً\s/i.test(trimmed) &&
-        currentLines.some((l) => /الاسم\s*[:：]|الجائزة\s*[:：]|RTWIN-|RTBOX-/i.test(l));
-      const startsNewByName =
-        /^الاسم\s*[:：]/.test(trimmed) &&
-        currentLines.some((l) => /الاسم\s*[:：]/.test(l) && /الجائزة\s*[:：]|RTWIN-|RTBOX-/i.test(currentLines.join('\n')));
-
-      if ((startsNewByHeader || startsNewByGreeting || startsNewByName) && currentLines.length > 0) {
-        blocks.push(currentLines.join('\n'));
-        currentLines = [line];
-      } else {
-        currentLines.push(line);
-      }
-    }
-    if (currentLines.length > 0) {
-      blocks.push(currentLines.join('\n'));
-    }
-
-    const seenKeys = new Set<string>();
-    const results: Array<{
-      clientName: string;
-      clientPhone?: string;
-      prizeTitle: string;
-      discountLabel?: string;
-      prizeCode?: string;
-      boxToken?: string;
-      branchName?: string;
-      openedAt?: string;
-      expiresAt?: string;
-      visitRef?: string;
-      validHours?: number;
-      status: 'opened' | 'redeemed';
-    }> = [];
-
-    const pushUnique = (item: (typeof results)[number]) => {
-      const dedupeKey = item.boxToken
-        ? `T:${item.boxToken.toUpperCase()}`
-        : item.prizeCode
-          ? `C:${item.prizeCode.toUpperCase()}`
-          : `N:${item.clientName}|${item.clientPhone || ''}|${item.prizeTitle}`;
-      if (seenKeys.has(dedupeKey)) {
-        // Merge phone/token if an earlier block missed it
-        const existing = results.find(
-          (r) =>
-            (item.boxToken && r.boxToken?.toUpperCase() === item.boxToken.toUpperCase()) ||
-            (item.prizeCode && r.prizeCode?.toUpperCase() === item.prizeCode.toUpperCase())
-        );
-        if (existing) {
-          if (!existing.clientPhone && item.clientPhone) existing.clientPhone = item.clientPhone;
-          if (!existing.prizeCode && item.prizeCode) existing.prizeCode = item.prizeCode;
-          if (!existing.boxToken && item.boxToken) existing.boxToken = item.boxToken;
-        }
-        return;
-      }
-      seenKeys.add(dedupeKey);
-      results.push(item);
-    };
-
-    for (const block of blocks) {
-      // Extract Egyptian phone from either body or WhatsApp export header line (e.g. "+20 101 234 5678:")
-      const compactDigitsBlock = normalizeArabicDigits(block).replace(/[\s\-().\u00a0]+/g, '');
-      const phoneMatch = compactDigitsBlock.match(/(?:\+?20?|0020?)?(01[0125]\d{8})/);
-
-      // First check if a 1-tap activation link (?view=admin&activate=...) was pasted inside this message
-      const activateParamMatch = block.match(/[?&]activate=([A-Za-z0-9_-]+)/);
-      if (activateParamMatch) {
-        const decodedAct = decodeAdminActivationPayload(activateParamMatch[1]);
-        if (decodedAct) {
-          pushUnique({
-            clientName: decodedAct.clientName,
-            clientPhone: decodedAct.clientPhone || (phoneMatch ? phoneMatch[1] : undefined),
-            prizeTitle: decodedAct.prizeTitle,
-            discountLabel: decodedAct.discountLabel,
-            prizeCode: decodedAct.prizeCode,
-            boxToken: decodedAct.token,
-            branchName: decodedAct.branchName || recoveryBranch || labProfile.branches[0],
-            openedAt: decodedAct.openedAt,
-            expiresAt: decodedAct.expiresAt,
-            visitRef: decodedAct.visitRef,
-            validHours: decodedAct.validHours,
-            status: recoveryStatus,
-          });
-          continue;
-        }
-      }
-
-      const nameMatch = block.match(/الاسم\s*[:：]\s*(.+)/);
-      const prizeMatch = block.match(/الجائزة\s*[:：]\s*(.+)/);
-      const branchMatch = block.match(/الفرع\s*[:：]\s*(.+)/);
-      const codeMatch =
-        block.match(/كود الجائزة\s*[:：]\s*([A-Za-z0-9_-]+)/i) ||
-        block.match(/\b(RTWIN-[A-Za-z0-9]+)\b/i);
-      const boxTokenMatch =
-        block.match(/رقم الصندوق\s*[:：]\s*([A-Za-z0-9_-]+)/i) ||
-        block.match(/\b(RTBOX-[A-Za-z0-9]+)\b/i);
-
-      if (!nameMatch && !prizeMatch && !codeMatch && !boxTokenMatch) continue;
-
-      let prizeTitle = (prizeMatch?.[1] || '').trim();
-      let discountLabel: string | undefined;
-      const parenMatch = prizeTitle.match(/^(.*?)\s*\(([^()]+)\)\s*$/);
-      if (parenMatch) {
-        prizeTitle = parenMatch[1].trim();
-        discountLabel = parenMatch[2].trim();
-      }
-      if (!prizeTitle) {
-        prizeTitle = prizes[0]?.title || 'جائزة صندوق الفرحة';
-      }
-
-      pushUnique({
-        clientName: (nameMatch?.[1] || 'مريض مستعاد').trim(),
-        clientPhone: phoneMatch ? phoneMatch[1] : undefined,
-        prizeTitle,
-        discountLabel,
-        prizeCode: codeMatch?.[1]?.trim().toUpperCase(),
-        boxToken: boxTokenMatch?.[1]?.trim().toUpperCase(),
-        branchName: branchMatch?.[1]?.trim() || recoveryBranch || labProfile.branches[0],
-        status: recoveryStatus,
-      });
-    }
-
-    if (results.length === 1 && !results[0].clientPhone && recoveryFallbackPhone.trim()) {
-      results[0].clientPhone = recoveryFallbackPhone.trim();
-    }
-
-    return results;
-  }, [recoveryText, recoveryFallbackPhone, recoveryBranch, recoveryStatus, prizes, labProfile.branches]);
-
-  const handleImportWhatsAppBookings = async () => {
-    if (importingRecovery || parsedWhatsAppBookings.length === 0) return;
+  const importBookingsBatch = async (
+    itemsToImport: ReturnType<typeof parseWhatsAppBookingsText>,
+    clearTextOnSuccess = false
+  ) => {
+    if (importingRecovery || itemsToImport.length === 0) return;
     setImportingRecovery(true);
     try {
-      const res = await apiClient.importRecoveredBookings(parsedWhatsAppBookings, links, prizes);
+      const res = await apiClient.importRecoveredBookings(itemsToImport, links, prizes);
       await onRefresh();
-      setRecoveryText('');
-      setRecoveryFallbackPhone('');
+      if (clearTextOnSuccess) {
+        setRecoveryText('');
+        setRecoveryFallbackPhone('');
+      }
       const totalActivated = res.importedCount + res.upgradedCount;
       onNotify(
-        `تم جلب وتفعيل ${totalActivated} حجز في البرنامج${
-          res.skippedDuplicates > 0 ? ` (وتخطي ${res.skippedDuplicates} مكرر مفعل مسبقاً)` : ''
-        }.`
+        totalActivated > 0
+          ? `تم جلب وتفعيل ${totalActivated} حجز في البرنامج تلقائياً${
+              res.skippedDuplicates > 0 ? ` (وتخطي ${res.skippedDuplicates} مكرر مفعل مسبقاً)` : ''
+            }.`
+          : 'جميع هذه الحجوزات مسجلة ومفعلة بالفعل في البرنامج.'
       );
     } catch {
       onNotify('تعذر حفظ الحجوزات المستعادة في قاعدة البيانات.', true);
     } finally {
       setImportingRecovery(false);
     }
+  };
+
+  const handleOneTapClipboardImport = async () => {
+    if (importingRecovery) return;
+    if (typeof navigator === 'undefined' || !navigator.clipboard?.readText) {
+      setShowRecovery(true);
+      onNotify('الصق الرسائل داخل الصندوق ليتم استردادها تلقائياً.');
+      return;
+    }
+    try {
+      const clipText = await navigator.clipboard.readText();
+      if (!clipText || !clipText.trim()) {
+        setShowRecovery(true);
+        onNotify('انسخ أولاً رسالة أو عدة رسائل من الواتساب ثم اضغط هذا الزر ليتم الاسترداد تلقائياً.', true);
+        return;
+      }
+      const parsed = parseWhatsAppBookingsText(clipText, {
+        defaultBranch: recoveryBranch || labProfile.branches[0],
+        defaultPrizeTitle: prizes[0]?.title,
+        defaultStatus: recoveryStatus,
+      });
+      if (parsed.length === 0) {
+        setRecoveryText(clipText);
+        setShowRecovery(true);
+        onNotify('لم يُعثر على بيانات جائزة كاملة في النص المنسوخ — تأكد من نسخ رسالة الجائزة من الواتساب.', true);
+        return;
+      }
+      await importBookingsBatch(parsed, false);
+    } catch {
+      setShowRecovery(true);
+      onNotify('اسمح بالوصول للحافظة أو الصق الرسائل في الصندوق بالأسفل وسيتم التفعيل تلقائياً.');
+    }
+  };
+
+  const handleImportWhatsAppBookings = async () => {
+    await importBookingsBatch(parsedWhatsAppBookings, true);
   };
 
   const handleManualRecoverySubmit = async (e: React.FormEvent) => {
@@ -787,17 +696,32 @@ export function AdminLinksTab({
               جلب وتفعيل الحجوزات غير المسمّعة في البرنامج
             </h2>
             <p className="text-xs text-slate-600">
-              إذا وصلتك رسائل جوائز من المرضى على واتساب المعمل ولم تظهر في السجل، الصق رسائل الواتساب هنا أو أضف الحجز يدوياً.
+              يسترد البرنامج السجلات المعلقة تلقائياً عند الفتح، ولأي رسائل سابقة على واتساب المعمل فقط انسخها (رسالة أو عدة رسائل معاً) واضغط الزر التالي أو شاركها إلى التطبيق ليتم استردادها وتفعيلها أوتوماتيك بدون إدخال يدوي.
             </p>
           </div>
-          <button
-            type="button"
-            onClick={() => setShowRecovery((v) => !v)}
-            className="inline-flex min-h-[42px] shrink-0 items-center gap-1.5 rounded-xl bg-[#C9962D] px-4 py-2 text-xs font-extrabold text-[#3A0A14] shadow-xs transition-colors hover:bg-[#B8860B] cursor-pointer whitespace-nowrap"
-          >
-            <Download className="h-4 w-4" />
-            <span>{showRecovery ? 'إغلاق أداة الجلب' : 'جلب وتفعيل الحجوزات (واتساب / يدوي)'}</span>
-          </button>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              disabled={importingRecovery}
+              onClick={() => void handleOneTapClipboardImport()}
+              className="inline-flex min-h-[42px] shrink-0 items-center gap-1.5 rounded-xl bg-[#5C1422] px-4 py-2 text-xs font-extrabold text-white shadow-xs transition-colors hover:bg-[#7A1C2E] disabled:opacity-60 cursor-pointer whitespace-nowrap"
+            >
+              <ClipboardPaste className="h-4 w-4 text-[#E7C15A]" />
+              <span>
+                {importingRecovery
+                  ? 'جاري الاسترداد التلقائي...'
+                  : 'استرداد تلقائي من الحافظة (بضغطة واحدة)'}
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowRecovery((v) => !v)}
+              className="inline-flex min-h-[42px] shrink-0 items-center gap-1.5 rounded-xl bg-[#C9962D] px-4 py-2 text-xs font-extrabold text-[#3A0A14] shadow-xs transition-colors hover:bg-[#B8860B] cursor-pointer whitespace-nowrap"
+            >
+              <Download className="h-4 w-4" />
+              <span>{showRecovery ? 'إغلاق الخيارات المتقدمة' : 'رفع ملف واتساب / إدخال يدوي'}</span>
+            </button>
+          </div>
         </div>
 
         {showRecovery ? (
@@ -889,8 +813,17 @@ export function AdminLinksTab({
                         if (!file) return;
                         try {
                           const content = await file.text();
-                          setRecoveryText((prev) => (prev.trim() ? `${prev.trim()}\n\n${content}` : content));
-                          onNotify(`تمت قراءة ملف (${file.name}) بنجاح — راجع الحجوزات المرصودة واضغط زر التفعيل.`);
+                          const parsed = parseWhatsAppBookingsText(content, {
+                            defaultBranch: recoveryBranch || labProfile.branches[0],
+                            defaultPrizeTitle: prizes[0]?.title,
+                            defaultStatus: recoveryStatus,
+                          });
+                          if (parsed.length > 0) {
+                            await importBookingsBatch(parsed, true);
+                          } else {
+                            setRecoveryText((prev) => (prev.trim() ? `${prev.trim()}\n\n${content}` : content));
+                            onNotify(`تمت قراءة ملف (${file.name}) ولم يُرصد فيه رسائل جوائز.`, true);
+                          }
                         } catch {
                           onNotify('تعذر قراءة الملف النصي.', true);
                         }
@@ -902,7 +835,21 @@ export function AdminLinksTab({
                   rows={5}
                   value={recoveryText}
                   onChange={(e) => setRecoveryText(e.target.value)}
-                  placeholder={`الصق هنا رسالة أو عدة رسائل وصلتك على واتساب من المرضى مثل:\nالاسم: أحمد محمد\nالجائزة: تحليل CBC مجاناً (مجاناً 100%)\nكود الجائزة: RTWIN-AB12CD`}
+                  onPaste={(e) => {
+                    const pasted = e.clipboardData?.getData('text') || '';
+                    if (!pasted.trim()) return;
+                    const parsed = parseWhatsAppBookingsText(pasted, {
+                      defaultBranch: recoveryBranch || labProfile.branches[0],
+                      defaultPrizeTitle: prizes[0]?.title,
+                      defaultStatus: recoveryStatus,
+                      fallbackSinglePhone: recoveryFallbackPhone,
+                    });
+                    if (parsed.length > 0) {
+                      e.preventDefault();
+                      void importBookingsBatch(parsed, true);
+                    }
+                  }}
+                  placeholder={`الصق هنا رسالة أو عدة رسائل وصلتك على واتساب ليتم استردادها تلقائياً فوراً مثل:\nالاسم: أحمد محمد\nالجائزة: تحليل CBC مجاناً (مجاناً 100%)\nكود الجائزة: RTWIN-AB12CD`}
                   className="w-full rounded-xl border border-slate-300 bg-white p-3 text-xs leading-relaxed text-slate-900 focus:border-[#5C1422] focus:outline-none"
                 />
                 <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">

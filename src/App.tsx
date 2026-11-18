@@ -17,6 +17,7 @@ const DEFAULT_ASSET_LOGO = `${BASE_PATH}logo.jpg`;
 const DEFAULT_ASSET_ICON = `${BASE_PATH}icon.svg`;
 
 const PENDING_ACTIVATE_STORAGE_KEY = 'rt_hb_pending_activate';
+const PENDING_SHARE_STORAGE_KEY = 'rt_hb_pending_share_text';
 
 function readInitialUrlState(): {
   token: string | null;
@@ -24,9 +25,17 @@ function readInitialUrlState(): {
   wantsAdmin: boolean;
   referredBy: string | null;
   activateCode: string | null;
+  shareText: string | null;
 } {
   if (typeof window === 'undefined') {
-    return { token: null, encodedData: null, wantsAdmin: false, referredBy: null, activateCode: null };
+    return {
+      token: null,
+      encodedData: null,
+      wantsAdmin: false,
+      referredBy: null,
+      activateCode: null,
+      shareText: null,
+    };
   }
   const params = new URLSearchParams(window.location.search);
   const token = params.get('box') || params.get('token') || params.get('t') || null;
@@ -49,10 +58,37 @@ function readInitialUrlState(): {
     }
   }
   const activateCode = urlActivate || storedActivate;
+
+  const urlShareParts = [
+    params.get('share_title'),
+    params.get('share_text'),
+    params.get('share_url'),
+  ]
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+  if (urlShareParts) {
+    try {
+      window.sessionStorage.setItem(PENDING_SHARE_STORAGE_KEY, urlShareParts);
+    } catch {
+      // ignore
+    }
+  }
+  let storedShare: string | null = null;
+  if (!urlShareParts) {
+    try {
+      storedShare = window.sessionStorage.getItem(PENDING_SHARE_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+  }
+  const shareText = urlShareParts || storedShare || null;
+
   const hash = (window.location.hash || '').toLowerCase();
   const path = (window.location.pathname || '').toLowerCase();
   const wantsAdmin =
     Boolean(urlActivate) ||
+    Boolean(urlShareParts) ||
     params.get('view') === 'admin' ||
     params.get('admin') === '1' ||
     params.get('admin') === 'true' ||
@@ -60,7 +96,7 @@ function readInitialUrlState(): {
     hash === '#admin' ||
     hash === '#/admin' ||
     /\/admin\/?$/.test(path);
-  return { token, encodedData, wantsAdmin, referredBy, activateCode };
+  return { token, encodedData, wantsAdmin, referredBy, activateCode, shareText };
 }
 
 class AppErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean }> {
@@ -118,6 +154,7 @@ function AppContent() {
   const [boxToken, setBoxToken] = useState<string | null>(initial.token);
   const [encodedBoxData, setEncodedBoxData] = useState<string | null>(initial.encodedData);
   const [pendingActivateCode, setPendingActivateCode] = useState<string | null>(initial.activateCode);
+  const [pendingShareText, setPendingShareText] = useState<string | null>(initial.shareText);
 
   const [authReady, setAuthReady] = useState(false);
   const [isAdminAuthed, setIsAdminAuthed] = useState(false);
@@ -305,10 +342,20 @@ function AppContent() {
             shareBaseUrl={publicShareBaseUrl}
             lang={lang}
             pendingActivateCode={pendingActivateCode}
+            pendingShareText={pendingShareText}
             onActivationHandled={() => {
               setPendingActivateCode(null);
               try {
                 window.sessionStorage.removeItem(PENDING_ACTIVATE_STORAGE_KEY);
+              } catch {
+                // ignore
+              }
+              syncUrl('admin', null);
+            }}
+            onShareHandled={() => {
+              setPendingShareText(null);
+              try {
+                window.sessionStorage.removeItem(PENDING_SHARE_STORAGE_KEY);
               } catch {
                 // ignore
               }

@@ -14,7 +14,12 @@ import {
 } from 'lucide-react';
 import type { AdminDashboardData, AppLang, LabProfile } from '../types';
 import { apiClient } from '../services/apiClient';
-import { copyToClipboard, decodeAdminActivationPayload, formatWhatsAppPhone } from '../utils/whatsapp';
+import {
+  copyToClipboard,
+  decodeAdminActivationPayload,
+  formatWhatsAppPhone,
+  parseWhatsAppBookingsText,
+} from '../utils/whatsapp';
 import { AdminLinksTab } from './AdminLinksTab';
 import { AdminPrizesTab } from './AdminPrizesTab';
 import { AdminAnalyticsTab } from './AdminAnalyticsTab';
@@ -27,7 +32,9 @@ interface AdminPanelViewProps {
   shareBaseUrl: string;
   lang: AppLang;
   pendingActivateCode?: string | null;
+  pendingShareText?: string | null;
   onActivationHandled?: () => void;
+  onShareHandled?: () => void;
   onLogout: () => void;
   onProfileUpdated: (profile: LabProfile) => void;
   onPreviewBox: (token?: string) => void;
@@ -37,7 +44,9 @@ export function AdminPanelView({
   shareBaseUrl,
   lang,
   pendingActivateCode,
+  pendingShareText,
   onActivationHandled,
+  onShareHandled,
   onLogout,
   onProfileUpdated,
   onPreviewBox,
@@ -46,6 +55,7 @@ export function AdminPanelView({
   const [data, setData] = useState<AdminDashboardData | null>(() => apiClient.getCachedDashboard());
   const [loading, setLoading] = useState<boolean>(() => !apiClient.getCachedDashboard());
   const handledActivateRef = useRef<string | null>(null);
+  const handledShareRef = useRef<string | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<'admin' | 'patient' | null>(null);
@@ -193,12 +203,47 @@ export function AdminPanelView({
         }
       } catch (err) {
         console.error('Auto-activation failed:', err);
-        showToast('تعذر تفعيل الحجز تلقائياً — يمكنك لصق رسالة الواتساب في أداة الاستيراد.', true);
+        showToast('تعذر تفعيل الحجز تلقائياً — جرب لصقه بالضغطة الواحدة من واتساب.', true);
       } finally {
         onActivationHandled?.();
       }
     })();
   }, [pendingActivateCode, data?.prizes, onActivationHandled, runForceSync, showToast]);
+
+  useEffect(() => {
+    if (!pendingShareText || handledShareRef.current === pendingShareText) return;
+    if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+    const parsed = parseWhatsAppBookingsText(pendingShareText, {
+      defaultBranch: data?.labProfile.branches[0],
+      defaultPrizeTitle: data?.prizes[0]?.title,
+    });
+    handledShareRef.current = pendingShareText;
+    if (parsed.length === 0) {
+      onShareHandled?.();
+      return;
+    }
+    void (async () => {
+      try {
+        const res = await apiClient.importRecoveredBookings(
+          parsed,
+          data?.giftLinks || [],
+          data?.prizes || []
+        );
+        await runForceSync(true);
+        const total = res.importedCount + res.upgradedCount;
+        showToast(
+          total > 0
+            ? `تم استرداد وتفعيل ${total} حالة تلقائياً من رسالة الواتساب المشاركة بنجاح!`
+            : 'جميع الحالات المرسلة مفعلة ومسجلة بالفعل في البرنامج.'
+        );
+      } catch (err) {
+        console.error('Auto share import failed:', err);
+        showToast('تعذر استرداد الرسالة المشاركة تلقائياً — حاول مجدداً عند استقرار الشبكة.', true);
+      } finally {
+        onShareHandled?.();
+      }
+    })();
+  }, [pendingShareText, data?.giftLinks, data?.prizes, data?.labProfile.branches, onShareHandled, runForceSync, showToast]);
 
   if (loading || !data) {
     return (
