@@ -296,7 +296,7 @@ export function AdminSettingsTab({
             قوالب رسائل الواتساب التلقائية
           </h2>
           <p className="text-xs text-slate-500">
-            المتغيرات المتاحة: {'{clientName}'} {'{labName}'} {'{prizeTitle}'} {'{discountLabel}'} {'{prizeCode}'} {'{expiresAt}'} {'{appointmentAt}'} {'{boxUrl}'}
+            المتغيرات المتاحة: {'{clientName}'} {'{labName}'} {'{prizeTitle}'} {'{discountLabel}'} {'{prizeCode}'} {'{prizeTerms}'} {'{branchName}'} {'{expiresAt}'} {'{appointmentAt}'} {'{whatsappNumber}'} {'{boxUrl}'}
           </p>
         </div>
 

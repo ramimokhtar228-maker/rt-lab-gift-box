@@ -209,9 +209,9 @@ export function AdminLinksTab({
     const raw = recoveryText.trim();
     if (!raw) return [];
 
-    // Split multiple pasted WhatsApp messages reliably
+    // Split multiple pasted WhatsApp messages reliably without breaking inside a single message's terms block
     const blocks = raw
-      .split(/(?=مرحباً\s)|(?=الاسم\s*[:：])|\n{2,}/g)
+      .split(/(?=مرحباً\s)|(?=الاسم\s*[:：])|\n{2,}(?=[^\n]*(?:الاسم\s*[:：]|الجائزة\s*[:：]|RTWIN-))/g)
       .reduce<string[]>((acc, chunk) => {
         const trimmed = chunk.trim();
         if (!trimmed) return acc;
@@ -242,6 +242,7 @@ export function AdminLinksTab({
     for (const block of blocks) {
       const nameMatch = block.match(/الاسم\s*[:：]\s*(.+)/);
       const prizeMatch = block.match(/الجائزة\s*[:：]\s*(.+)/);
+      const branchMatch = block.match(/الفرع\s*[:：]\s*(.+)/);
       const codeMatch =
         block.match(/كود الجائزة\s*[:：]\s*([A-Za-z0-9_-]+)/i) ||
         block.match(/\b(RTWIN-[A-Za-z0-9]+)\b/i);
@@ -268,7 +269,7 @@ export function AdminLinksTab({
         prizeTitle,
         discountLabel,
         prizeCode: codeMatch?.[1]?.trim().toUpperCase(),
-        branchName: recoveryBranch || labProfile.branches[0],
+        branchName: branchMatch?.[1]?.trim() || recoveryBranch || labProfile.branches[0],
         status: recoveryStatus,
       });
     }

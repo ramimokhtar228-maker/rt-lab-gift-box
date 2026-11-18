@@ -1,4 +1,5 @@
-import type { BoxPublicResponse, GiftLink, LabProfile } from '../types';
+import type { BoxPublicResponse, GiftLink, LabProfile, PrizeCategory } from '../types';
+import { resolvePrizeTermsLines } from '../data/defaultPrizes';
 import { normalizeArabicDigits } from './phoneHash';
 
 export function formatWhatsAppPhone(raw: string): string {
@@ -175,9 +176,30 @@ export async function copyToClipboard(text: string): Promise<boolean> {
   }
 }
 
+function buildFormattedPrizeTermsText(params: {
+  title?: string | null;
+  category?: PrizeCategory | null;
+  terms?: string | null;
+  validHours?: number | null;
+}): string {
+  const lines = resolvePrizeTermsLines({
+    title: params.title || 'جائزة صندوق السعادة',
+    category: params.category || 'DISCOUNT',
+    terms: params.terms || undefined,
+    validHours: params.validHours || 48,
+  });
+  return lines.map((line) => `• ${line}`).join('\n');
+}
+
 export function buildPatientClaimWhatsAppUrl(box: BoxPublicResponse, lab: LabProfile): string {
   const phone = formatWhatsAppPhone(lab.whatsappNumber || lab.hotlineNumber);
-  const text = applyTemplate(lab.whatsappPatientClaimTemplate, {
+  const prizeTerms = buildFormattedPrizeTermsText({
+    title: box.prize?.title,
+    category: box.prize?.category,
+    terms: box.prize?.terms,
+    validHours: box.prize?.validHours,
+  });
+  let text = applyTemplate(lab.whatsappPatientClaimTemplate, {
     labName: lab.labName,
     clientName: box.clientName,
     prizeTitle: box.prize?.title || '',
@@ -188,7 +210,11 @@ export function buildPatientClaimWhatsAppUrl(box: BoxPublicResponse, lab: LabPro
     branchName: box.branchName,
     whatsappNumber: phone || lab.whatsappNumber,
     hotlineNumber: lab.hotlineNumber,
+    prizeTerms,
   });
+  if (!lab.whatsappPatientClaimTemplate.includes('{prizeTerms}') && prizeTerms) {
+    text = `${text}\n\n📋 شروط الجائزة وضوابط الاستفادة الكاملة:\n${prizeTerms}`;
+  }
   return `https://wa.me/${phone}?text=${encodeURIComponent(text)}`;
 }
 
@@ -239,6 +265,13 @@ export function buildAdminWinnerReplyWhatsAppUrl(link: GiftLink, lab: LabProfile
       }`
     : '';
 
+  const prizeTerms = buildFormattedPrizeTermsText({
+    title: link.prizeTitle,
+    category: link.prizeCategory,
+    terms: link.prizeTerms,
+    validHours: link.validHours,
+  });
+
   let text = applyTemplate(lab.whatsappWinnerReplyTemplate, {
     labName: lab.labName,
     clientName: link.clientName,
@@ -251,6 +284,7 @@ export function buildAdminWinnerReplyWhatsAppUrl(link: GiftLink, lab: LabProfile
     appointmentAt: link.appointmentAt?.trim() || 'لم يحدد بعد',
     whatsappNumber: labPhone || lab.whatsappNumber,
     hotlineNumber: lab.hotlineNumber,
+    prizeTerms,
   });
 
   if (!lab.whatsappWinnerReplyTemplate.includes('{appointmentAt}') && apptText) {

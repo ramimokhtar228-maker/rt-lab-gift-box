@@ -38,7 +38,7 @@ export const DEFAULT_LAB_PROFILE: LabProfile = {
   tagline: 'دقة التشخيص .. رعاية متكاملة لأجل صحتك',
   director: 'د. رامي مختار — استشاري الباثولوجيا الإكلينيكية',
   hotlineNumber: '01100046841',
-  whatsappNumber: '201100874444',
+  whatsappNumber: '201124485444',
   address: 'ميدان بهتيم، برج صيدلية العزبي، الدور الثالث، شبرا الخيمة',
   workingHours: 'يومياً من 10:00 صباحاً إلى 10:00 مساءً',
   branches: [
@@ -53,7 +53,7 @@ export const DEFAULT_LAB_PROFILE: LabProfile = {
   whatsappWinnerReplyTemplate:
     'ألف مبروك يا {clientName} 🎉\nتم تأكيد فوزك من {labName} بجائزة:\n🎁 {prizeTitle} ({discountLabel})\n🔑 كود الجائزة: {prizeCode}\n⏳ الجائزة متاحة لوقت محدد وتنتهي صلاحيتها في: {expiresAt}\n📅 الموعد المحدد: {appointmentAt}\n\nيسعدنا تشريفك في أقرب فرع أو حجز السحب المنزلي قبل انتهاء الموعد!',
   whatsappPatientClaimTemplate:
-    'مرحباً {labName}، فتحت صندوق السعادة وكسبت الجائزة التالية:\nالاسم: {clientName}\nالجائزة: {prizeTitle} ({discountLabel})\nكود الجائزة: {prizeCode}\nصالحة حتى: {expiresAt}\nأرغب في تأكيد تفعيل الجائزة وحجز الموعد.',
+    'مرحباً {labName}، فتحت صندوق السعادة وكسبت الجائزة التالية:\nالاسم: {clientName}\nالجائزة: {prizeTitle} ({discountLabel})\nكود الجائزة: {prizeCode}\nالفرع: {branchName}\nصالحة حتى: {expiresAt}\n\n📋 شروط الجائزة وضوابط الاستفادة الكاملة:\n{prizeTerms}\n\nأرغب في تأكيد تفعيل الجائزة وحجز الموعد.',
   shareBaseUrl: 'https://ramimokhtar228-maker.github.io/rt-lab-gift-box',
 };
 
@@ -395,17 +395,24 @@ export const apiClient = {
         profile.director = String(d.director ?? profile.director);
         profile.hotlineNumber = String(d.hotlineNumber ?? profile.hotlineNumber);
         const serverWa = String(d.whatsappNumber || '').trim();
-        if (serverWa) {
-          profile.whatsappNumber = formatWhatsAppPhone(serverWa) || serverWa;
+        const normalizedServerWa = serverWa ? formatWhatsAppPhone(serverWa) || serverWa : '';
+        if (normalizedServerWa) {
+          profile.whatsappNumber =
+            normalizedServerWa === '201100874444'
+              ? DEFAULT_LAB_PROFILE.whatsappNumber
+              : normalizedServerWa;
           hasServerWhatsapp = true;
         }
         profile.address = String(d.address ?? profile.address);
         profile.workingHours = String(d.workingHours ?? profile.workingHours);
         profile.branches = Array.isArray(d.branches) ? d.branches.map(String) : profile.branches;
         profile.logoUrl = String(d.logoUrl || profile.logoUrl);
-        profile.whatsappPatientClaimTemplate = String(
+        const serverClaimTpl = String(
           d.whatsappPatientClaimTemplate ?? profile.whatsappPatientClaimTemplate
         );
+        profile.whatsappPatientClaimTemplate = serverClaimTpl.includes('{prizeTerms}')
+          ? serverClaimTpl
+          : DEFAULT_LAB_PROFILE.whatsappPatientClaimTemplate;
         profile.shareBaseUrl = String(d.shareBaseUrl ?? '');
       }
     } catch (err) {
@@ -416,7 +423,9 @@ export const apiClient = {
     if (decoded) {
       if (decoded.ln && !hasServerProfile) profile.labName = decoded.ln;
       if (decoded.wa && !hasServerWhatsapp) {
-        profile.whatsappNumber = formatWhatsAppPhone(decoded.wa) || decoded.wa;
+        const decodedWa = formatWhatsAppPhone(decoded.wa) || decoded.wa;
+        profile.whatsappNumber =
+          decodedWa === '201100874444' ? DEFAULT_LAB_PROFILE.whatsappNumber : decodedWa;
       }
       if (decoded.ht && !hasServerProfile) profile.hotlineNumber = decoded.ht;
     }
@@ -434,22 +443,28 @@ export const apiClient = {
         if (!snap.exists()) return;
         const d = snap.data();
         const serverWa = String(d.whatsappNumber || '').trim();
+        const normalizedWa = serverWa ? formatWhatsAppPhone(serverWa) || serverWa : '';
+        const resolvedWa =
+          !normalizedWa || normalizedWa === '201100874444'
+            ? DEFAULT_LAB_PROFILE.whatsappNumber
+            : normalizedWa;
+        const serverClaimTpl = String(
+          d.whatsappPatientClaimTemplate ?? DEFAULT_LAB_PROFILE.whatsappPatientClaimTemplate
+        );
         const profile: LabProfile = {
           ...DEFAULT_LAB_PROFILE,
           labName: String(d.labName || DEFAULT_LAB_PROFILE.labName),
           tagline: String(d.tagline ?? DEFAULT_LAB_PROFILE.tagline),
           director: String(d.director ?? DEFAULT_LAB_PROFILE.director),
           hotlineNumber: String(d.hotlineNumber ?? DEFAULT_LAB_PROFILE.hotlineNumber),
-          whatsappNumber: serverWa
-            ? formatWhatsAppPhone(serverWa) || serverWa
-            : DEFAULT_LAB_PROFILE.whatsappNumber,
+          whatsappNumber: resolvedWa,
           address: String(d.address ?? DEFAULT_LAB_PROFILE.address),
           workingHours: String(d.workingHours ?? DEFAULT_LAB_PROFILE.workingHours),
           branches: Array.isArray(d.branches) ? d.branches.map(String) : DEFAULT_LAB_PROFILE.branches,
           logoUrl: String(d.logoUrl || DEFAULT_ASSET_LOGO),
-          whatsappPatientClaimTemplate: String(
-            d.whatsappPatientClaimTemplate ?? DEFAULT_LAB_PROFILE.whatsappPatientClaimTemplate
-          ),
+          whatsappPatientClaimTemplate: serverClaimTpl.includes('{prizeTerms}')
+            ? serverClaimTpl
+            : DEFAULT_LAB_PROFILE.whatsappPatientClaimTemplate,
           shareBaseUrl: String(d.shareBaseUrl ?? ''),
         };
         onProfile(profile, profile.shareBaseUrl || getAppShareBase());
@@ -928,6 +943,34 @@ export const apiClient = {
       if (!profileSnap.exists()) {
         batch.set(doc(db, 'publicConfig', 'labProfile'), buildPublicProfilePayload(DEFAULT_LAB_PROFILE));
         hasWrites = true;
+      } else {
+        const pData = profileSnap.data();
+        const curWa = formatWhatsAppPhone(String(pData.whatsappNumber || '')) || String(pData.whatsappNumber || '');
+        const curTpl = String(pData.whatsappPatientClaimTemplate || '');
+        const needsWaUpgrade = !curWa || curWa === '201100874444';
+        const needsTplUpgrade = !curTpl.includes('{prizeTerms}');
+        if (needsWaUpgrade || needsTplUpgrade) {
+          const upgradedProfile: LabProfile = {
+            ...DEFAULT_LAB_PROFILE,
+            labName: String(pData.labName || DEFAULT_LAB_PROFILE.labName),
+            tagline: String(pData.tagline ?? DEFAULT_LAB_PROFILE.tagline),
+            director: String(pData.director ?? DEFAULT_LAB_PROFILE.director),
+            hotlineNumber: String(pData.hotlineNumber ?? DEFAULT_LAB_PROFILE.hotlineNumber),
+            whatsappNumber: needsWaUpgrade ? DEFAULT_LAB_PROFILE.whatsappNumber : curWa,
+            address: String(pData.address ?? DEFAULT_LAB_PROFILE.address),
+            workingHours: String(pData.workingHours ?? DEFAULT_LAB_PROFILE.workingHours),
+            branches: Array.isArray(pData.branches)
+              ? pData.branches.map(String)
+              : DEFAULT_LAB_PROFILE.branches,
+            logoUrl: String(pData.logoUrl || DEFAULT_ASSET_LOGO),
+            whatsappPatientClaimTemplate: needsTplUpgrade
+              ? DEFAULT_LAB_PROFILE.whatsappPatientClaimTemplate
+              : curTpl,
+            shareBaseUrl: String(pData.shareBaseUrl ?? DEFAULT_LAB_PROFILE.shareBaseUrl),
+          };
+          batch.set(doc(db, 'publicConfig', 'labProfile'), buildPublicProfilePayload(upgradedProfile));
+          hasWrites = true;
+        }
       }
 
       if (!templatesSnap.exists()) {
@@ -1052,19 +1095,22 @@ export const apiClient = {
       (snap) => {
         if (snap.exists()) {
           const d = snap.data();
+          const curWa = formatWhatsAppPhone(String(d.whatsappNumber || '')) || String(d.whatsappNumber || '');
+          const curTpl = String(d.whatsappPatientClaimTemplate ?? DEFAULT_LAB_PROFILE.whatsappPatientClaimTemplate);
           publicProfile = {
             labName: String(d.labName || DEFAULT_LAB_PROFILE.labName),
             tagline: String(d.tagline ?? DEFAULT_LAB_PROFILE.tagline),
             director: String(d.director ?? DEFAULT_LAB_PROFILE.director),
             hotlineNumber: String(d.hotlineNumber ?? DEFAULT_LAB_PROFILE.hotlineNumber),
-            whatsappNumber: String(d.whatsappNumber || DEFAULT_LAB_PROFILE.whatsappNumber),
+            whatsappNumber:
+              !curWa || curWa === '201100874444' ? DEFAULT_LAB_PROFILE.whatsappNumber : curWa,
             address: String(d.address ?? DEFAULT_LAB_PROFILE.address),
             workingHours: String(d.workingHours ?? DEFAULT_LAB_PROFILE.workingHours),
             branches: Array.isArray(d.branches) ? d.branches.map(String) : DEFAULT_LAB_PROFILE.branches,
             logoUrl: String(d.logoUrl || DEFAULT_ASSET_LOGO),
-            whatsappPatientClaimTemplate: String(
-              d.whatsappPatientClaimTemplate ?? DEFAULT_LAB_PROFILE.whatsappPatientClaimTemplate
-            ),
+            whatsappPatientClaimTemplate: curTpl.includes('{prizeTerms}')
+              ? curTpl
+              : DEFAULT_LAB_PROFILE.whatsappPatientClaimTemplate,
             shareBaseUrl: String(d.shareBaseUrl ?? ''),
           };
         }
@@ -2021,18 +2067,21 @@ export const apiClient = {
     const labProfile: LabProfile = { ...DEFAULT_LAB_PROFILE };
     if (profileSnap?.exists()) {
       const d = profileSnap.data();
+      const curWa = formatWhatsAppPhone(String(d.whatsappNumber || '')) || String(d.whatsappNumber || '');
+      const curTpl = String(d.whatsappPatientClaimTemplate ?? labProfile.whatsappPatientClaimTemplate);
       labProfile.labName = String(d.labName || labProfile.labName);
       labProfile.tagline = String(d.tagline ?? labProfile.tagline);
       labProfile.director = String(d.director ?? labProfile.director);
       labProfile.hotlineNumber = String(d.hotlineNumber ?? labProfile.hotlineNumber);
-      labProfile.whatsappNumber = String(d.whatsappNumber || labProfile.whatsappNumber);
+      labProfile.whatsappNumber =
+        !curWa || curWa === '201100874444' ? DEFAULT_LAB_PROFILE.whatsappNumber : curWa;
       labProfile.address = String(d.address ?? labProfile.address);
       labProfile.workingHours = String(d.workingHours ?? labProfile.workingHours);
       labProfile.branches = Array.isArray(d.branches) ? d.branches.map(String) : labProfile.branches;
       labProfile.logoUrl = String(d.logoUrl || DEFAULT_ASSET_LOGO);
-      labProfile.whatsappPatientClaimTemplate = String(
-        d.whatsappPatientClaimTemplate ?? labProfile.whatsappPatientClaimTemplate
-      );
+      labProfile.whatsappPatientClaimTemplate = curTpl.includes('{prizeTerms}')
+        ? curTpl
+        : DEFAULT_LAB_PROFILE.whatsappPatientClaimTemplate;
       labProfile.shareBaseUrl = String(d.shareBaseUrl ?? '');
     }
     if (templatesSnap?.exists()) {
