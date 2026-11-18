@@ -93,7 +93,7 @@ define(['./workbox-b1bafff1'], (function (workbox) { 'use strict';
     "revision": "2dc1d31eada272c55bbfd1febadbb758"
   }, {
     "url": "index.html",
-    "revision": "e514e83009135c850f96ab072b4aa71a"
+    "revision": "21e74a1c46907d98ac73feb8b8cc7e37"
   }, {
     "url": "icon.svg",
     "revision": "f7223aade1a49bb1ab9bcc794d747b25"
@@ -113,10 +113,10 @@ define(['./workbox-b1bafff1'], (function (workbox) { 'use strict';
     "url": "assets/opened_happiness_box_1794768644943-BA832AjR.jpg",
     "revision": null
   }, {
-    "url": "assets/index-CqD5d2hQ.css",
+    "url": "assets/index-xjtlSFiL.js",
     "revision": null
   }, {
-    "url": "assets/index-Cchmxa22.js",
+    "url": "assets/index-CqD5d2hQ.css",
     "revision": null
   }, {
     "url": "assets/aistudio/Screenshot_20261116-083349_Chrome_2fb9fcd6.jpg",
@@ -147,7 +147,7 @@ define(['./workbox-b1bafff1'], (function (workbox) { 'use strict';
     "revision": "93999195931854a5eb512e9a289cf391"
   }, {
     "url": "manifest.webmanifest",
-    "revision": "8c467b7c01ed6e2331dea61d09a76f56"
+    "revision": "8cede0ad2cdfe41bf5f759e1c32f65b6"
   }], {});
   workbox.cleanupOutdatedCaches();
   workbox.registerRoute(new workbox.NavigationRoute(workbox.createHandlerBoundToURL("index.html"), {
