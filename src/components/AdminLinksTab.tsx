@@ -17,6 +17,7 @@ import {
   Search,
   ShieldCheck,
   Trash2,
+  Upload,
 } from 'lucide-react';
 import type { GameMode, GiftLink, LabProfile, LoyaltyTier, Prize } from '../types';
 import { GAME_MODE_META } from '../i18n/translations';
@@ -278,6 +279,7 @@ export function AdminLinksTab({
       blocks.push(currentLines.join('\n'));
     }
 
+    const seenKeys = new Set<string>();
     const results: Array<{
       clientName: string;
       clientPhone?: string;
@@ -293,15 +295,43 @@ export function AdminLinksTab({
       status: 'opened' | 'redeemed';
     }> = [];
 
+    const pushUnique = (item: (typeof results)[number]) => {
+      const dedupeKey = item.boxToken
+        ? `T:${item.boxToken.toUpperCase()}`
+        : item.prizeCode
+          ? `C:${item.prizeCode.toUpperCase()}`
+          : `N:${item.clientName}|${item.clientPhone || ''}|${item.prizeTitle}`;
+      if (seenKeys.has(dedupeKey)) {
+        // Merge phone/token if an earlier block missed it
+        const existing = results.find(
+          (r) =>
+            (item.boxToken && r.boxToken?.toUpperCase() === item.boxToken.toUpperCase()) ||
+            (item.prizeCode && r.prizeCode?.toUpperCase() === item.prizeCode.toUpperCase())
+        );
+        if (existing) {
+          if (!existing.clientPhone && item.clientPhone) existing.clientPhone = item.clientPhone;
+          if (!existing.prizeCode && item.prizeCode) existing.prizeCode = item.prizeCode;
+          if (!existing.boxToken && item.boxToken) existing.boxToken = item.boxToken;
+        }
+        return;
+      }
+      seenKeys.add(dedupeKey);
+      results.push(item);
+    };
+
     for (const block of blocks) {
+      // Extract Egyptian phone from either body or WhatsApp export header line (e.g. "+20 101 234 5678:")
+      const compactDigitsBlock = normalizeArabicDigits(block).replace(/[\s\-().\u00a0]+/g, '');
+      const phoneMatch = compactDigitsBlock.match(/(?:\+?20?|0020?)?(01[0125]\d{8})/);
+
       // First check if a 1-tap activation link (?view=admin&activate=...) was pasted inside this message
       const activateParamMatch = block.match(/[?&]activate=([A-Za-z0-9_-]+)/);
       if (activateParamMatch) {
         const decodedAct = decodeAdminActivationPayload(activateParamMatch[1]);
         if (decodedAct) {
-          results.push({
+          pushUnique({
             clientName: decodedAct.clientName,
-            clientPhone: decodedAct.clientPhone,
+            clientPhone: decodedAct.clientPhone || (phoneMatch ? phoneMatch[1] : undefined),
             prizeTitle: decodedAct.prizeTitle,
             discountLabel: decodedAct.discountLabel,
             prizeCode: decodedAct.prizeCode,
@@ -327,10 +357,6 @@ export function AdminLinksTab({
         block.match(/رقم الصندوق\s*[:：]\s*([A-Za-z0-9_-]+)/i) ||
         block.match(/\b(RTBOX-[A-Za-z0-9]+)\b/i);
 
-      // Extract Egyptian phone even when formatted with spaces/dashes like "+20 101 234 5678"
-      const compactDigitsBlock = normalizeArabicDigits(block).replace(/[\s\-().]+/g, '');
-      const phoneMatch = compactDigitsBlock.match(/(?:\+?20?|0020?)?(01[0125]\d{8})/);
-
       if (!nameMatch && !prizeMatch && !codeMatch && !boxTokenMatch) continue;
 
       let prizeTitle = (prizeMatch?.[1] || '').trim();
@@ -344,7 +370,7 @@ export function AdminLinksTab({
         prizeTitle = prizes[0]?.title || 'جائزة صندوق الفرحة';
       }
 
-      results.push({
+      pushUnique({
         clientName: (nameMatch?.[1] || 'مريض مستعاد').trim(),
         clientPhone: phoneMatch ? phoneMatch[1] : undefined,
         prizeTitle,
@@ -846,6 +872,32 @@ export function AdminLinksTab({
 
             {recoveryMode === 'whatsapp' ? (
               <div className="space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[#C9962D]/35 bg-white px-3.5 py-2.5 text-xs">
+                  <span className="font-bold text-slate-700">
+                    يمكنك لصق الرسائل مباشرة أو رفع ملف تصدير محادثات واتساب (.txt) لاستيراد جميع الحجوزات السابقة دفعة واحدة:
+                  </span>
+                  <label className="inline-flex min-h-[36px] shrink-0 items-center gap-1.5 rounded-xl border border-[#5C1422]/25 bg-[#FAF7F4] px-3 py-1.5 text-xs font-extrabold text-[#5C1422] hover:bg-[#FDEFD1] cursor-pointer">
+                    <Upload className="h-3.5 w-3.5" />
+                    <span>رفع ملف واتساب (.txt)</span>
+                    <input
+                      type="file"
+                      accept=".txt,text/plain"
+                      className="sr-only"
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0];
+                        e.target.value = '';
+                        if (!file) return;
+                        try {
+                          const content = await file.text();
+                          setRecoveryText((prev) => (prev.trim() ? `${prev.trim()}\n\n${content}` : content));
+                          onNotify(`تمت قراءة ملف (${file.name}) بنجاح — راجع الحجوزات المرصودة واضغط زر التفعيل.`);
+                        } catch {
+                          onNotify('تعذر قراءة الملف النصي.', true);
+                        }
+                      }}
+                    />
+                  </label>
+                </div>
                 <textarea
                   rows={5}
                   value={recoveryText}

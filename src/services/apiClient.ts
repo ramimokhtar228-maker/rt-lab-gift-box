@@ -20,7 +20,7 @@ import {
   resolvePrizeDistributionTier,
 } from '../data/defaultPrizes';
 import { INITIAL_PRICES } from '../data/initialPrices';
-import { auth, db, FIREBASE_DATABASE_ID, FIREBASE_PROJECT_ID, handleFirestoreError, OperationType } from '../firebase';
+import { auth, db, FIREBASE_API_KEY, FIREBASE_DATABASE_ID, FIREBASE_PROJECT_ID, handleFirestoreError, OperationType } from '../firebase';
 import { hashPhoneNumber, normalizeCanonicalPhone } from '../utils/phoneHash';
 import { formatWhatsAppPhone, type WhatsAppAdminActivationPayload } from '../utils/whatsapp';
 import {
@@ -156,7 +156,7 @@ function toFirestoreRestFields(obj: Record<string, unknown>): Record<string, unk
   return fields;
 }
 
-async function withCommitTimeout<T>(promise: Promise<T>, timeoutMs = 7000): Promise<T> {
+async function withCommitTimeout<T>(promise: Promise<T>, timeoutMs = 3000): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
@@ -170,8 +170,12 @@ async function withCommitTimeout<T>(promise: Promise<T>, timeoutMs = 7000): Prom
   }
 }
 
+function getFirestoreRestBaseUrl(): string {
+  return `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(FIREBASE_PROJECT_ID)}/databases/${encodeURIComponent(FIREBASE_DATABASE_ID)}/documents`;
+}
+
 async function commitGiftLinkViaRest(writes: Array<Record<string, unknown>>): Promise<void> {
-  const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(FIREBASE_PROJECT_ID)}/databases/${encodeURIComponent(FIREBASE_DATABASE_ID)}/documents:commit`;
+  const url = `${getFirestoreRestBaseUrl()}:commit?key=${encodeURIComponent(FIREBASE_API_KEY)}`;
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   try {
     const idToken = await auth.currentUser?.getIdToken();
@@ -189,6 +193,22 @@ async function commitGiftLinkViaRest(writes: Array<Record<string, unknown>>): Pr
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(`REST commit failed (${res.status}): ${text}`);
+  }
+}
+
+async function verifyGiftLinkExistsOnServer(token: string): Promise<boolean> {
+  try {
+    const snap = await withCommitTimeout(getDocFromServer(doc(db, 'giftLinks', token)), 2500);
+    if (snap.exists()) return true;
+  } catch {
+    // fallback to REST check
+  }
+  try {
+    const url = `${getFirestoreRestBaseUrl()}/giftLinks/${encodeURIComponent(token)}?key=${encodeURIComponent(FIREBASE_API_KEY)}`;
+    const res = await fetch(url, { method: 'GET' });
+    return res.ok;
+  } catch {
+    return false;
   }
 }
 
@@ -225,6 +245,34 @@ async function restCreateGiftLinkAndContact(
       currentDocument: { exists: false },
     },
   ]);
+}
+
+async function restUpsertPhoneLockBestEffort(
+  phoneHash: string,
+  activeToken: string,
+  expiresAt: string,
+  validHours: number
+): Promise<void> {
+  if (!phoneHash || !activeToken) return;
+  try {
+    const lockUntil = new Date(Date.now() + Math.max(1, validHours) * 3600_000);
+    await commitGiftLinkViaRest([
+      {
+        update: {
+          name: restDocPath(`phoneLocks/${phoneHash}`),
+          fields: toFirestoreRestFields({
+            id: phoneHash,
+            activeToken,
+            expiresAt,
+            lockUntil,
+          }),
+        },
+        updateTransforms: [{ fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' }],
+      },
+    ]);
+  } catch {
+    // non-fatal best-effort phone lock
+  }
 }
 
 async function restUpdateGiftLinkToOpened(
@@ -583,7 +631,7 @@ async function fetchActivePrizes(encodedData?: string | null): Promise<Prize[]> 
   if (typeof navigator === 'undefined' || navigator.onLine) {
     try {
       const q = query(collection(db, 'prizes'), where('active', '==', true));
-      const snap = await getDocs(q);
+      const snap = await withCommitTimeout(getDocs(q), 3000);
       if (!snap.empty) {
         const loaded = snap.docs.map((d) => {
           const data = d.data();
@@ -1194,25 +1242,29 @@ export const apiClient = {
 
       let cloudSynced = false;
       try {
-        await withCommitTimeout(batch.commit());
+        await withCommitTimeout(batch.commit(), 3000);
         cloudSynced = true;
       } catch (err) {
-        console.warn('Primary openBox update batch failed, retrying link update without phoneLock:', err);
+        console.warn('Primary openBox update batch failed, trying HTTPS REST commit immediately:', err);
         try {
-          await withCommitTimeout(
-            updateDoc(linkRef, {
-              ...updateFields,
-              updatedAt: serverTimestamp(),
-            })
-          );
+          await restUpdateGiftLinkToOpened(clean, updateFields);
           cloudSynced = true;
-        } catch (retryErr) {
-          console.warn('SDK fallback openBox update failed, trying HTTPS REST commit:', retryErr);
+          if (phoneHash) {
+            void restUpsertPhoneLockBestEffort(phoneHash, clean, expiresAt, resolvedValidHours);
+          }
+        } catch (restErr) {
+          console.warn('REST openBox update failed, trying direct SDK updateDoc:', restErr);
           try {
-            await restUpdateGiftLinkToOpened(clean, updateFields);
+            await withCommitTimeout(
+              updateDoc(linkRef, {
+                ...updateFields,
+                updatedAt: serverTimestamp(),
+              }),
+              3000
+            );
             cloudSynced = true;
-          } catch (restErr) {
-            console.warn('REST fallback openBox update queued for sync:', restErr);
+          } catch (retryErr) {
+            console.warn('All openBox update transports deferred to sync queue:', retryErr);
             enqueueOfflineMutation('open_box', { box: outBox, clientPhone: decoded?.p || '' });
           }
         }
@@ -1350,32 +1402,46 @@ export const apiClient = {
 
     let cloudSynced = false;
     try {
-      await withCommitTimeout(batch.commit());
+      await withCommitTimeout(batch.commit(), 3000);
       cloudSynced = true;
     } catch (err) {
-      console.warn('Primary openBox create batch failed, retrying without phoneLock:', err);
+      console.warn('Primary openBox create batch failed, trying HTTPS REST commit immediately:', err);
       try {
-        const fallbackBatch = writeBatch(db);
-        fallbackBatch.set(linkRef, {
-          ...baseCreateFields,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-        fallbackBatch.set(doc(db, 'giftLinks', clean, 'private', 'contact'), {
-          clientPhone,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-        await withCommitTimeout(fallbackBatch.commit());
+        await restCreateGiftLinkAndContact(clean, baseCreateFields, clientPhone);
         cloudSynced = true;
-      } catch (retryErr) {
-        console.warn('SDK fallback openBox create failed, trying HTTPS REST commit:', retryErr);
+        if (decodedPhoneHash) {
+          void restUpsertPhoneLockBestEffort(decodedPhoneHash, clean, expiresAt, validHours);
+        }
+      } catch (restErr) {
+        console.warn('REST openBox create failed, trying SDK batch without phoneLock:', restErr);
+        try {
+          const fallbackBatch = writeBatch(db);
+          fallbackBatch.set(linkRef, {
+            ...baseCreateFields,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+          fallbackBatch.set(doc(db, 'giftLinks', clean, 'private', 'contact'), {
+            clientPhone,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+          await withCommitTimeout(fallbackBatch.commit(), 3000);
+          cloudSynced = true;
+        } catch (retryErr) {
+          console.warn('All openBox create transports deferred to sync queue:', retryErr);
+          enqueueOfflineMutation('open_box', { box: outBox, clientPhone });
+        }
+      }
+    }
+
+    if (cloudSynced) {
+      const confirmed = await verifyGiftLinkExistsOnServer(clean);
+      if (!confirmed) {
         try {
           await restCreateGiftLinkAndContact(clean, baseCreateFields, clientPhone);
-          cloudSynced = true;
-        } catch (restErr) {
-          console.warn('REST fallback openBox create queued for sync:', restErr);
-          enqueueOfflineMutation('open_box', { box: outBox, clientPhone });
+        } catch {
+          // already committed via SDK or queued
         }
       }
     }
@@ -1401,7 +1467,7 @@ export const apiClient = {
     const phoneHash = await hashPhoneNumber(canonicalPhone);
     if (phoneHash && (typeof navigator === 'undefined' || navigator.onLine)) {
       try {
-        const lockSnap = await getDoc(doc(db, 'phoneLocks', phoneHash));
+        const lockSnap = await withCommitTimeout(getDoc(doc(db, 'phoneLocks', phoneHash)), 2500);
         if (lockSnap.exists()) {
           const lockData = lockSnap.data();
           const activeToken = normalizeId(String(lockData.activeToken || ''));
@@ -1551,24 +1617,38 @@ export const apiClient = {
 
     let cloudSynced = false;
     try {
-      await withCommitTimeout(batch.commit());
+      await withCommitTimeout(batch.commit(), 3000);
       cloudSynced = true;
     } catch (err) {
-      console.warn('Primary self-box batch commit failed, retrying giftLink+contact without phoneLock:', err);
+      console.warn('Primary self-box batch commit failed, trying HTTPS REST commit immediately:', err);
       try {
-        const fallbackBatch = writeBatch(db);
-        fallbackBatch.set(doc(db, 'giftLinks', token), docPayload);
-        fallbackBatch.set(doc(db, 'giftLinks', token, 'private', 'contact'), contactPayload);
-        await withCommitTimeout(fallbackBatch.commit());
+        await restCreateGiftLinkAndContact(token, baseDocFields, canonicalPhone);
         cloudSynced = true;
-      } catch (retryErr) {
-        console.warn('SDK fallback self-box commit failed, trying HTTPS REST commit:', retryErr);
+        if (phoneHash) {
+          void restUpsertPhoneLockBestEffort(phoneHash, token, expiresAt, validHours);
+        }
+      } catch (restErr) {
+        console.warn('REST self-box commit failed, trying SDK batch without phoneLock:', restErr);
+        try {
+          const fallbackBatch = writeBatch(db);
+          fallbackBatch.set(doc(db, 'giftLinks', token), docPayload);
+          fallbackBatch.set(doc(db, 'giftLinks', token, 'private', 'contact'), contactPayload);
+          await withCommitTimeout(fallbackBatch.commit(), 3000);
+          cloudSynced = true;
+        } catch (retryErr) {
+          console.warn('All self-box commit transports deferred to sync queue:', retryErr);
+          enqueueOfflineMutation('open_box', { box: outBox, clientPhone: canonicalPhone });
+        }
+      }
+    }
+
+    if (cloudSynced) {
+      const confirmed = await verifyGiftLinkExistsOnServer(token);
+      if (!confirmed) {
         try {
           await restCreateGiftLinkAndContact(token, baseDocFields, canonicalPhone);
-          cloudSynced = true;
-        } catch (restErr) {
-          console.warn('REST fallback self-box commit queued for sync:', restErr);
-          enqueueOfflineMutation('open_box', { box: outBox, clientPhone: canonicalPhone });
+        } catch {
+          // ignore if already present
         }
       }
     }
@@ -1834,36 +1914,45 @@ export const apiClient = {
 
     const unsubLinks = onSnapshot(
       collection(db, 'giftLinks'),
-      async (snap) => {
+      (snap) => {
         const docs = snap.docs;
-        const missingIds = docs
-          .map((d) => d.id)
-          .filter((id) => !phoneCache.has(id));
+        const buildSorted = () =>
+          docs
+            .map((d) => docToGiftLink(d.id, d.data(), phoneCache.get(d.id) || ''))
+            .sort((a, b) => {
+              const ta = new Date(a.openedAt || a.createdAt).getTime() || 0;
+              const tb = new Date(b.openedAt || b.createdAt).getTime() || 0;
+              return tb - ta;
+            });
+
+        // Emit immediately so newly synced patients appear without waiting for subcollection lookups
+        giftLinks = buildSorted();
+        emit();
+
+        const missingIds = docs.map((d) => d.id).filter((id) => !phoneCache.has(id));
         if (missingIds.length > 0 && (typeof navigator === 'undefined' || navigator.onLine)) {
-          await Promise.all(
+          void Promise.all(
             missingIds.map(async (id) => {
               try {
                 const contactSnap = await getDoc(doc(db, 'giftLinks', id, 'private', 'contact'));
                 if (contactSnap.exists()) {
                   phoneCache.set(id, String(contactSnap.data().clientPhone || ''));
-                } else if (!phoneCache.has(id)) {
-                  phoneCache.set(id, '');
+                  return true;
                 }
+                if (!phoneCache.has(id)) phoneCache.set(id, '');
+                return false;
               } catch {
                 if (!phoneCache.has(id)) phoneCache.set(id, '');
+                return false;
               }
             })
-          );
-        }
-
-        giftLinks = docs
-          .map((d) => docToGiftLink(d.id, d.data(), phoneCache.get(d.id) || ''))
-          .sort((a, b) => {
-            const ta = new Date(a.openedAt || a.createdAt).getTime() || 0;
-            const tb = new Date(b.openedAt || b.createdAt).getTime() || 0;
-            return tb - ta;
+          ).then((results) => {
+            if (results.some(Boolean)) {
+              giftLinks = buildSorted();
+              emit();
+            }
           });
-        emit();
+        }
       },
       (err) => {
         if (typeof navigator !== 'undefined' && !navigator.onLine) return;
@@ -2825,7 +2914,7 @@ export const apiClient = {
       }
     }
 
-    await syncOfflineQueue();
+    await withCommitTimeout(syncOfflineQueue(), 4000).catch(() => 0);
 
     const [initialLinksSnap, deletedSnap] = await Promise.all([
       getDocsFromServer(collection(db, 'giftLinks')),

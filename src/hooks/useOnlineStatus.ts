@@ -62,6 +62,16 @@ export function useOnlineStatus() {
     };
   }, [refreshQueueCount, triggerSync]);
 
+  useEffect(() => {
+    if (!isOnline || pendingCount <= 0) return;
+    const retryTimer = window.setInterval(() => {
+      if (typeof navigator === 'undefined' || navigator.onLine) {
+        void triggerSync();
+      }
+    }, 15000);
+    return () => window.clearInterval(retryTimer);
+  }, [isOnline, pendingCount, triggerSync]);
+
   return {
     isOnline,
     pendingCount,

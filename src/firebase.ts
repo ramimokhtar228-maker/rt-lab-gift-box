@@ -36,6 +36,7 @@ googleProvider.setCustomParameters({ prompt: 'select_account' });
 
 export const FIREBASE_PROJECT_ID = firebaseConfig.projectId;
 export const FIREBASE_DATABASE_ID = firebaseConfig.firestoreDatabaseId || '(default)';
+export const FIREBASE_API_KEY = firebaseConfig.apiKey;
 export const ADMIN_BOOTSTRAP_EMAIL = 'rtlabrami@gmail.com';
 
 export enum OperationType {

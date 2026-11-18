@@ -198,12 +198,54 @@ export function PatientBoxView({
   }, [token, loadBox]);
 
   useEffect(() => {
+    if (typeof navigator === 'undefined' || navigator.onLine) {
+      void apiClient.syncAllCachedBoxesToCloud();
+    }
+  }, []);
+
+  useEffect(() => {
     if (!box || (box.status !== 'opened' && box.status !== 'redeemed')) return;
     const timer = window.setInterval(() => {
       setTick((t) => t + 1);
     }, 1000);
     return () => window.clearInterval(timer);
   }, [box]);
+
+  useEffect(() => {
+    if (!box || cloudSynced !== false) return;
+    if (box.status !== 'opened' && box.status !== 'redeemed') return;
+
+    let stopped = false;
+    const attemptCloudRetry = async () => {
+      if (stopped || (typeof navigator !== 'undefined' && !navigator.onLine)) return;
+      let savedPhone = selfPhone.trim();
+      if (!savedPhone) {
+        try {
+          savedPhone = window.localStorage.getItem(`rt_hb_phone_${box.token.toUpperCase()}`) || '';
+        } catch {
+          // ignore
+        }
+      }
+      const ok = await apiClient.syncCachedBoxToCloud(box, savedPhone);
+      if (!stopped && ok) {
+        setCloudSynced(true);
+      }
+    };
+
+    const retryInterval = window.setInterval(() => {
+      void attemptCloudRetry();
+    }, 10000);
+    const onOnline = () => {
+      void attemptCloudRetry();
+    };
+    window.addEventListener('online', onOnline);
+
+    return () => {
+      stopped = true;
+      window.clearInterval(retryInterval);
+      window.removeEventListener('online', onOnline);
+    };
+  }, [box, cloudSynced, selfPhone]);
 
   const fireCelebration = () => {
     playBoxOpenChime(muted);
@@ -238,7 +280,7 @@ export function PatientBoxView({
         setErrorMsg(data.message || 'تعذر فتح الصندوق حالياً.');
       } else {
         setBox(data.box);
-        setCloudSynced(data.cloudSynced ?? !data.alreadyClaimed ? Boolean(data.cloudSynced ?? true) : true);
+        setCloudSynced(data.alreadyClaimed ? true : Boolean(data.cloudSynced));
         if (data.alreadyClaimed && data.message) {
           setAlreadyClaimedMsg(data.message);
           onBoxAssigned(data.box.token);

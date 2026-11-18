@@ -103,46 +103,41 @@ export function AdminPanelView({
   );
 
   useEffect(() => {
-    let unsub: (() => void) | undefined;
     let cancelled = false;
 
-    void (async () => {
-      try {
-        await apiClient.ensureInitialSeed();
-      } catch (err) {
+    void apiClient.ensureInitialSeed().catch((err) => {
+      if (!cancelled && (typeof navigator === 'undefined' || navigator.onLine)) {
+        console.error('Seed check error:', err);
+      }
+    });
+
+    const unsub = apiClient.subscribeAdminDashboard(
+      (snapshotData) => {
+        if (cancelled) return;
+        setData(snapshotData);
+        callbacksRef.current.onProfileUpdated(snapshotData.labProfile);
+        setLastSyncedAt(
+          new Date().toLocaleTimeString('ar-EG', {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+          })
+        );
+        setLoading(false);
+      },
+      (err) => {
+        console.error('Dashboard subscription error:', err);
         if (!cancelled && (typeof navigator === 'undefined' || navigator.onLine)) {
-          console.error('Seed check error:', err);
+          showToast('تعذر قراءة بيانات المرضى من السحابة — تأكد من صلاحية الحساب.', true);
         }
+        setLoading(false);
       }
+    );
 
-      if (cancelled) return;
-
-      unsub = apiClient.subscribeAdminDashboard(
-        (snapshotData) => {
-          setData(snapshotData);
-          callbacksRef.current.onProfileUpdated(snapshotData.labProfile);
-          setLastSyncedAt(
-            new Date().toLocaleTimeString('ar-EG', {
-              hour: '2-digit',
-              minute: '2-digit',
-              second: '2-digit',
-            })
-          );
-          setLoading(false);
-        },
-        (err) => {
-          console.error('Dashboard subscription error:', err);
-          if (typeof navigator === 'undefined' || navigator.onLine) {
-            showToast('تعذر قراءة بيانات المرضى من السحابة — تأكد من صلاحية الحساب.', true);
-          }
-          setLoading(false);
-        }
-      );
-
-      if (typeof navigator === 'undefined' || navigator.onLine) {
-        void runForceSync(true);
-      }
-    })();
+    if (typeof navigator === 'undefined' || navigator.onLine) {
+      void apiClient.syncAllCachedBoxesToCloud().catch(() => 0);
+      void runForceSync(true);
+    }
 
     const handleResumeSync = () => {
       if (
@@ -159,7 +154,7 @@ export function AdminPanelView({
       ) {
         void runForceSync(true);
       }
-    }, 30000);
+    }, 15000);
 
     window.addEventListener('focus', handleResumeSync);
     document.addEventListener('visibilitychange', handleResumeSync);
@@ -169,7 +164,7 @@ export function AdminPanelView({
       window.clearInterval(intervalId);
       window.removeEventListener('focus', handleResumeSync);
       document.removeEventListener('visibilitychange', handleResumeSync);
-      if (unsub) unsub();
+      unsub();
     };
   }, [runForceSync, showToast]);
 

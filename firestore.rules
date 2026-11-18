@@ -348,8 +348,7 @@ service cloud.firestore {
         incoming().id == linkId &&
         incoming().token == linkId &&
         incoming().createdAt == request.time &&
-        incoming().updatedAt == request.time &&
-        existsAfter(/databases/$(database)/documents/giftLinks/$(linkId)/private/contact) && (
+        incoming().updatedAt == request.time && (
           isAdmin() ||
           (
             !exists(/databases/$(database)/documents/deletedLinks/$(linkId)) &&
