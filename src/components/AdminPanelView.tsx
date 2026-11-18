@@ -139,8 +139,31 @@ export function AdminPanelView({
       }
     })();
 
+    const handleResumeSync = () => {
+      if (
+        (typeof document === 'undefined' || document.visibilityState === 'visible') &&
+        (typeof navigator === 'undefined' || navigator.onLine)
+      ) {
+        void runForceSync(true);
+      }
+    };
+    const intervalId = window.setInterval(() => {
+      if (
+        (typeof document === 'undefined' || document.visibilityState === 'visible') &&
+        (typeof navigator === 'undefined' || navigator.onLine)
+      ) {
+        void runForceSync(true);
+      }
+    }, 30000);
+
+    window.addEventListener('focus', handleResumeSync);
+    document.addEventListener('visibilitychange', handleResumeSync);
+
     return () => {
       cancelled = true;
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', handleResumeSync);
+      document.removeEventListener('visibilitychange', handleResumeSync);
       if (unsub) unsub();
     };
   }, [runForceSync, showToast]);

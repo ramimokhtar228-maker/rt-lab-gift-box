@@ -270,6 +270,7 @@ export function AdminLinksTab({
       prizeTitle: string;
       discountLabel?: string;
       prizeCode?: string;
+      boxToken?: string;
       branchName?: string;
       status: 'opened' | 'redeemed';
     }> = [];
@@ -281,11 +282,14 @@ export function AdminLinksTab({
       const codeMatch =
         block.match(/كود الجائزة\s*[:：]\s*([A-Za-z0-9_-]+)/i) ||
         block.match(/\b(RTWIN-[A-Za-z0-9]+)\b/i);
+      const boxTokenMatch =
+        block.match(/رقم الصندوق\s*[:：]\s*([A-Za-z0-9_-]+)/i) ||
+        block.match(/\b(RTBOX-[A-Za-z0-9]+)\b/i);
 
       const asciiBlock = normalizeArabicDigits(block);
       const phoneMatch = asciiBlock.match(/(?:\+?2)?(01[0-25]\d{8})/);
 
-      if (!nameMatch && !prizeMatch && !codeMatch) continue;
+      if (!nameMatch && !prizeMatch && !codeMatch && !boxTokenMatch) continue;
 
       let prizeTitle = (prizeMatch?.[1] || '').trim();
       let discountLabel: string | undefined;
@@ -304,6 +308,7 @@ export function AdminLinksTab({
         prizeTitle,
         discountLabel,
         prizeCode: codeMatch?.[1]?.trim().toUpperCase(),
+        boxToken: boxTokenMatch?.[1]?.trim().toUpperCase(),
         branchName: branchMatch?.[1]?.trim() || recoveryBranch || labProfile.branches[0],
         status: recoveryStatus,
       });
@@ -908,6 +913,14 @@ export function AdminLinksTab({
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowRecovery(true)}
+              className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl border border-[#C9962D]/50 bg-[#FFF8EB] px-3 py-1.5 text-xs font-extrabold text-[#5C1422] hover:bg-[#FDEFD1] cursor-pointer whitespace-nowrap"
+            >
+              <Download className="h-3.5 w-3.5 text-[#B8860B]" />
+              <span>استيراد حالة من واتساب</span>
+            </button>
             <button
               type="button"
               disabled={syncingList}

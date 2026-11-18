@@ -154,6 +154,9 @@ export function PatientBoxView({
           void apiClient.syncCachedBoxToCloud(cachedParsed);
         } else {
           setBox(data.box);
+          if (data.fromLocalCache && (data.box.status === 'opened' || data.box.status === 'redeemed')) {
+            void apiClient.syncCachedBoxToCloud(data.box);
+          }
           if (
             (data.box.status === 'opened' || data.box.status === 'redeemed') &&
             data.box.prize
@@ -286,10 +289,9 @@ export function PatientBoxView({
           setAlreadyClaimedMsg(data.message);
         }
         try {
-          window.localStorage.setItem(
-            `rt_hb_won_${data.box.token.toUpperCase()}`,
-            JSON.stringify(data.box)
-          );
+          const tokUpper = data.box.token.toUpperCase();
+          window.localStorage.setItem(`rt_hb_won_${tokUpper}`, JSON.stringify(data.box));
+          window.localStorage.setItem(`rt_hb_phone_${tokUpper}`, canonical);
         } catch {
           // ignore
         }

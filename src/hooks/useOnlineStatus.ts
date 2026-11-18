@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { getOfflineQueueCount, syncOfflineQueue } from '../services/apiClient';
+import { apiClient, getOfflineQueueCount, syncOfflineQueue } from '../services/apiClient';
 
 export function useOnlineStatus() {
   const [isOnline, setIsOnline] = useState<boolean>(() =>
@@ -14,13 +14,14 @@ export function useOnlineStatus() {
 
   const triggerSync = useCallback(async () => {
     if (typeof navigator !== 'undefined' && !navigator.onLine) return 0;
-    const count = getOfflineQueueCount();
-    if (count === 0) return 0;
     setIsSyncing(true);
     try {
-      const synced = await syncOfflineQueue();
+      const [queueSynced, cachedSynced] = await Promise.all([
+        syncOfflineQueue(),
+        apiClient.syncAllCachedBoxesToCloud(),
+      ]);
       setPendingCount(getOfflineQueueCount());
-      return synced;
+      return queueSynced + cachedSynced;
     } finally {
       setIsSyncing(false);
     }
@@ -38,12 +39,18 @@ export function useOnlineStatus() {
     const handleQueueChange = () => {
       refreshQueueCount();
     };
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible' && (typeof navigator === 'undefined' || navigator.onLine)) {
+        void triggerSync();
+      }
+    };
 
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
     window.addEventListener('rt-offline-queue-updated', handleQueueChange);
+    document.addEventListener('visibilitychange', handleVisibility);
 
-    if (typeof navigator !== 'undefined' && navigator.onLine && getOfflineQueueCount() > 0) {
+    if (typeof navigator === 'undefined' || navigator.onLine) {
       void triggerSync();
     }
 
@@ -51,6 +58,7 @@ export function useOnlineStatus() {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
       window.removeEventListener('rt-offline-queue-updated', handleQueueChange);
+      document.removeEventListener('visibilitychange', handleVisibility);
     };
   }, [refreshQueueCount, triggerSync]);
 

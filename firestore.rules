@@ -453,7 +453,8 @@ service cloud.firestore {
             existsAfter(/databases/$(database)/documents/giftLinks/$(incoming().activeToken)) &&
             (
               request.time >= existing().lockUntil ||
-              !exists(/databases/$(database)/documents/giftLinks/$(existing().activeToken))
+              !exists(/databases/$(database)/documents/giftLinks/$(existing().activeToken)) ||
+              get(/databases/$(database)/documents/giftLinks/$(existing().activeToken)).data.status in ['cancelled', 'expired']
             )
           )
         );

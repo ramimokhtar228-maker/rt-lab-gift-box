@@ -82,7 +82,7 @@ export const DEFAULT_LAB_PROFILE: LabProfile = {
   whatsappWinnerReplyTemplate:
     'ألف مبروك يا {clientName} 🎉\nتم تأكيد فوزك من {labName} بجائزة:\n🎁 {prizeTitle} ({discountLabel})\n🔑 كود الجائزة: {prizeCode}\n⏳ الجائزة متاحة لوقت محدد وتنتهي صلاحيتها في: {expiresAt}\n📅 الموعد المحدد: {appointmentAt}\n\nيسعدنا تشريفك في أقرب فرع أو حجز السحب المنزلي قبل انتهاء الموعد!',
   whatsappPatientClaimTemplate:
-    'مرحباً {labName}، فتحت صندوق السعادة وكسبت الجائزة التالية:\nالاسم: {clientName}\nالجائزة: {prizeTitle} ({discountLabel})\nكود الجائزة: {prizeCode}\nالفرع: {branchName}\nصالحة حتى: {expiresAt}\n\n📋 شروط الجائزة وضوابط الاستفادة الكاملة:\n{prizeTerms}\n\nأرغب في تأكيد تفعيل الجائزة وحجز الموعد.',
+    'مرحباً {labName}، فتحت صندوق السعادة وكسبت الجائزة التالية:\nالاسم: {clientName}\nالجائزة: {prizeTitle} ({discountLabel})\nكود الجائزة: {prizeCode}\nرقم الصندوق: {boxToken}\nالفرع: {branchName}\nصالحة حتى: {expiresAt}\n\n📋 شروط الجائزة وضوابط الاستفادة الكاملة:\n{prizeTerms}\n\nأرغب في تأكيد تفعيل الجائزة وحجز الموعد.',
   shareBaseUrl: 'https://ramimokhtar228-maker.github.io/rt-lab-gift-box',
   defaultGameMode: 'box',
   activeCampaign: 'حملة صندوق الفرحة الدائمة',
@@ -693,7 +693,10 @@ export async function syncOfflineQueue(): Promise<number> {
         const box = item.payload.box as BoxPublicResponse;
         const phone = String(item.payload.clientPhone || '');
         if (box?.token) {
-          await apiClient.syncCachedBoxToCloud(box, phone);
+          const ok = await apiClient.syncCachedBoxToCloud(box, phone);
+          if (!ok) {
+            throw new Error(`Sync retry deferred for ${box.token}`);
+          }
         }
       } else if (item.type === 'redeem_code') {
         const code = String(item.payload.code || '');
@@ -798,7 +801,13 @@ export const apiClient = {
   async getBoxByToken(
     token: string,
     encodedData?: string | null
-  ): Promise<{ ok: boolean; deleted?: boolean; box?: BoxPublicResponse; message?: string }> {
+  ): Promise<{
+    ok: boolean;
+    deleted?: boolean;
+    fromLocalCache?: boolean;
+    box?: BoxPublicResponse;
+    message?: string;
+  }> {
     const clean = normalizeId(token);
     if (!clean) {
       return { ok: false, message: 'رابط صندوق السعادة غير صحيح.' };
@@ -832,14 +841,14 @@ export const apiClient = {
       }
     } catch (error) {
       const cached = loadCachedBox(clean);
-      if (cached) return { ok: true, box: cached };
+      if (cached) return { ok: true, fromLocalCache: true, box: cached };
       if (typeof navigator !== 'undefined' && navigator.onLine) {
         handleFirestoreError(error, OperationType.GET, path);
       }
     }
 
     const cached = loadCachedBox(clean);
-    if (cached) return { ok: true, box: cached };
+    if (cached) return { ok: true, fromLocalCache: true, box: cached };
 
     const decoded = decodeBoxData(encodedData);
     if (decoded || clean === 'RTBOX-DEMO2026') {
@@ -1066,8 +1075,31 @@ export const apiClient = {
 
       try {
         await batch.commit();
-      } catch {
-        enqueueOfflineMutation('open_box', { box: outBox, clientPhone: decoded?.p || '' });
+      } catch (err) {
+        console.warn('Primary openBox update batch failed, retrying link update without phoneLock:', err);
+        try {
+          await updateDoc(linkRef, {
+            status: 'opened',
+            openedAt,
+            expiresAt,
+            gameMode: chosenMode,
+            ...(typeof options?.selectedGameBox === 'number'
+              ? { selectedGameBox: options.selectedGameBox }
+              : {}),
+            prizeId: String(prizeId || 'prz_pre').slice(0, 128),
+            prizeTitle: (prizeTitle || 'جائزة صندوق السعادة').slice(0, 200),
+            prizeDescription: (prizeDescription || '').slice(0, 600),
+            prizeTerms: finalTerms,
+            prizeDiscountLabel: (prizeDiscountLabel || 'هدية خاصة').slice(0, 80),
+            prizeCategory: String(prizeCategory || 'DISCOUNT').slice(0, 40),
+            prizeCode: prizeCode.slice(0, 64),
+            validHours: resolvedValidHours,
+            updatedAt: serverTimestamp(),
+          });
+        } catch (retryErr) {
+          console.warn('Fallback openBox update queued for sync:', retryErr);
+          enqueueOfflineMutation('open_box', { box: outBox, clientPhone: decoded?.p || '' });
+        }
       }
       return { ok: true, box: outBox };
     }
@@ -1198,8 +1230,56 @@ export const apiClient = {
 
     try {
       await batch.commit();
-    } catch {
-      enqueueOfflineMutation('open_box', { box: outBox, clientPhone });
+    } catch (err) {
+      console.warn('Primary openBox create batch failed, retrying without phoneLock:', err);
+      try {
+        const fallbackBatch = writeBatch(db);
+        fallbackBatch.set(linkRef, {
+          id: clean,
+          token: clean,
+          clientName,
+          visitRef,
+          branchName,
+          ...(decodedPhoneHash ? { phoneHash: decodedPhoneHash } : {}),
+          status: 'opened',
+          gameMode: chosenMode,
+          ...(typeof options?.selectedGameBox === 'number'
+            ? { selectedGameBox: options.selectedGameBox }
+            : {}),
+          loyaltyTier: 'Basic',
+          loyaltyPoints: 50,
+          referralCode,
+          createdAt: serverTimestamp(),
+          expiresAt,
+          openedAt,
+          redeemedAt: null,
+          redeemedBy: null,
+          cancelledAt: null,
+          cancelledBy: null,
+          invoiceAmount: null,
+          rewardCost: null,
+          appointmentAt: null,
+          appointmentNote: null,
+          prizeId: chosen.id.slice(0, 128),
+          prizeTitle: (chosen.title || 'جائزة صندوق السعادة').slice(0, 200),
+          prizeDescription: (chosen.description || '').slice(0, 600),
+          prizeTerms,
+          prizeDiscountLabel: (chosen.discountLabel || 'هدية خاصة').slice(0, 80),
+          prizeCategory: String(chosen.category || 'DISCOUNT').slice(0, 40),
+          prizeCode,
+          validHours,
+          updatedAt: serverTimestamp(),
+        });
+        fallbackBatch.set(doc(db, 'giftLinks', clean, 'private', 'contact'), {
+          clientPhone,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+        await fallbackBatch.commit();
+      } catch (retryErr) {
+        console.warn('Fallback openBox create queued for sync:', retryErr);
+        enqueueOfflineMutation('open_box', { box: outBox, clientPhone });
+      }
     }
 
     return { ok: true, box: outBox };
@@ -1311,8 +1391,7 @@ export const apiClient = {
       return { ok: true, box: outBox };
     }
 
-    const batch = writeBatch(db);
-    batch.set(doc(db, 'giftLinks', token), {
+    const docPayload = {
       id: token,
       token,
       clientName: cleanName,
@@ -1341,20 +1420,24 @@ export const apiClient = {
       appointmentAt: null,
       appointmentNote: null,
       prizeId: chosen.id.slice(0, 128),
-      prizeTitle: chosen.title.slice(0, 200),
-      prizeDescription: chosen.description.slice(0, 600),
+      prizeTitle: (chosen.title || 'جائزة صندوق السعادة').slice(0, 200),
+      prizeDescription: (chosen.description || '').slice(0, 600),
       prizeTerms,
-      prizeDiscountLabel: chosen.discountLabel.slice(0, 80),
-      prizeCategory: chosen.category.slice(0, 40),
+      prizeDiscountLabel: (chosen.discountLabel || 'هدية خاصة').slice(0, 80),
+      prizeCategory: String(chosen.category || 'DISCOUNT').slice(0, 40),
       prizeCode,
       validHours,
       updatedAt: serverTimestamp(),
-    });
-    batch.set(doc(db, 'giftLinks', token, 'private', 'contact'), {
+    };
+    const contactPayload = {
       clientPhone: canonicalPhone,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
-    });
+    };
+
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'giftLinks', token), docPayload);
+    batch.set(doc(db, 'giftLinks', token, 'private', 'contact'), contactPayload);
     if (phoneHash) {
       batch.set(doc(db, 'phoneLocks', phoneHash), {
         id: phoneHash,
@@ -1367,8 +1450,17 @@ export const apiClient = {
 
     try {
       await batch.commit();
-    } catch {
-      enqueueOfflineMutation('open_box', { box: outBox, clientPhone: canonicalPhone });
+    } catch (err) {
+      console.warn('Primary self-box batch commit failed, retrying giftLink+contact without phoneLock:', err);
+      try {
+        const fallbackBatch = writeBatch(db);
+        fallbackBatch.set(doc(db, 'giftLinks', token), docPayload);
+        fallbackBatch.set(doc(db, 'giftLinks', token, 'private', 'contact'), contactPayload);
+        await fallbackBatch.commit();
+      } catch (retryErr) {
+        console.warn('Fallback self-box commit queued for sync:', retryErr);
+        enqueueOfflineMutation('open_box', { box: outBox, clientPhone: canonicalPhone });
+      }
     }
 
     return { ok: true, box: outBox };
@@ -1636,7 +1728,7 @@ export const apiClient = {
         const docs = snap.docs;
         const missingIds = docs
           .map((d) => d.id)
-          .filter((id) => !phoneCache.has(id) || !phoneCache.get(id));
+          .filter((id) => !phoneCache.has(id));
         if (missingIds.length > 0 && (typeof navigator === 'undefined' || navigator.onLine)) {
           await Promise.all(
             missingIds.map(async (id) => {
@@ -2000,12 +2092,22 @@ export const apiClient = {
     }
 
     try {
-      await updateDoc(doc(db, 'giftLinks', cleanId), {
+      const linkSnap = await getDoc(doc(db, 'giftLinks', cleanId)).catch(() => null);
+      const phoneHash = linkSnap?.exists() ? String(linkSnap.data().phoneHash || '') : '';
+      const batch = writeBatch(db);
+      batch.update(doc(db, 'giftLinks', cleanId), {
         status: 'cancelled',
         cancelledAt: new Date().toISOString(),
         cancelledBy: staffName.slice(0, 120),
         updatedAt: serverTimestamp(),
       });
+      if (phoneHash) {
+        const lockSnap = await getDoc(doc(db, 'phoneLocks', phoneHash)).catch(() => null);
+        if (lockSnap?.exists() && lockSnap.data().activeToken === cleanId) {
+          batch.delete(doc(db, 'phoneLocks', phoneHash));
+        }
+      }
+      await batch.commit();
       return { ok: true, message: 'تم إلغاء الكود ومنع استخدامه بنجاح.' };
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, `giftLinks/${cleanId}/cancel`);
@@ -2437,7 +2539,7 @@ export const apiClient = {
     }
     if (getDeletedTokensSet().has(clean)) {
       addDeletedTokensLocally([clean]);
-      return false;
+      return true;
     }
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
       return false;
@@ -2446,18 +2548,18 @@ export const apiClient = {
       const delSnap = await getDoc(doc(db, 'deletedLinks', clean));
       if (delSnap.exists()) {
         addDeletedTokensLocally([clean]);
-        return false;
+        return true;
       }
 
       const snap = await getDoc(doc(db, 'giftLinks', clean));
       if (snap.exists()) {
         const existing = snap.data();
         if (existing.status === 'opened' || existing.status === 'redeemed' || existing.status === 'cancelled') {
-          return false;
+          return true;
         }
       }
 
-      const validHours = Math.max(1, Number(cachedBox.prize.validHours || 48));
+      const validHours = Math.min(2160, Math.max(1, Number(cachedBox.prize.validHours || 48)));
       const openedAt = cachedBox.openedAt || new Date().toISOString();
       const expiresAt =
         cachedBox.expiresAt && !Number.isNaN(new Date(cachedBox.expiresAt).getTime())
@@ -2472,6 +2574,15 @@ export const apiClient = {
         })
       ).slice(0, 1000);
 
+      let resolvedPhone = clientPhone;
+      if (!resolvedPhone && typeof window !== 'undefined' && window.localStorage) {
+        try {
+          resolvedPhone = window.localStorage.getItem(`rt_hb_phone_${clean}`) || '';
+        } catch {
+          // ignore
+        }
+      }
+
       const batch = writeBatch(db);
       if (snap.exists()) {
         batch.update(doc(db, 'giftLinks', clean), {
@@ -2483,7 +2594,7 @@ export const apiClient = {
             ? { selectedGameBox: cachedBox.selectedGameBox }
             : {}),
           prizeId: 'prz_cached',
-          prizeTitle: cachedBox.prize.title.slice(0, 200),
+          prizeTitle: (cachedBox.prize.title || 'جائزة صندوق السعادة').slice(0, 200),
           prizeDescription: (cachedBox.prize.description || '').slice(0, 600),
           prizeTerms,
           prizeDiscountLabel: (cachedBox.prize.discountLabel || 'هدية خاصة').slice(0, 80),
@@ -2493,7 +2604,7 @@ export const apiClient = {
           updatedAt: serverTimestamp(),
         });
       } else {
-        const canonicalPhone = normalizeCanonicalPhone(clientPhone);
+        const canonicalPhone = normalizeCanonicalPhone(resolvedPhone);
         const phoneHash = canonicalPhone.length >= 8 ? await hashPhoneNumber(canonicalPhone) : '';
         batch.set(doc(db, 'giftLinks', clean), {
           id: clean,
@@ -2520,10 +2631,10 @@ export const apiClient = {
           cancelledBy: null,
           invoiceAmount: null,
           rewardCost: null,
-          appointmentAt: cachedBox.appointmentAt || null,
-          appointmentNote: cachedBox.appointmentNote || null,
+          appointmentAt: null,
+          appointmentNote: null,
           prizeId: 'prz_cached',
-          prizeTitle: cachedBox.prize.title.slice(0, 200),
+          prizeTitle: (cachedBox.prize.title || 'جائزة صندوق السعادة').slice(0, 200),
           prizeDescription: (cachedBox.prize.description || '').slice(0, 600),
           prizeTerms,
           prizeDiscountLabel: (cachedBox.prize.discountLabel || 'هدية خاصة').slice(0, 80),
@@ -2540,9 +2651,40 @@ export const apiClient = {
       }
       await batch.commit();
       return true;
-    } catch {
+    } catch (err) {
+      console.warn('syncCachedBoxToCloud deferred:', clean, err);
       return false;
     }
+  },
+
+  async syncAllCachedBoxesToCloud(): Promise<number> {
+    if (typeof window === 'undefined' || !window.localStorage) return 0;
+    if (typeof navigator !== 'undefined' && !navigator.onLine) return 0;
+
+    let synced = 0;
+    try {
+      const keys: string[] = [];
+      for (let i = 0; i < window.localStorage.length; i++) {
+        const k = window.localStorage.key(i);
+        if (k && k.startsWith('rt_hb_won_')) keys.push(k);
+      }
+      for (const k of keys) {
+        const raw = window.localStorage.getItem(k);
+        if (!raw) continue;
+        try {
+          const parsed = JSON.parse(raw) as BoxPublicResponse;
+          if (parsed?.token && parsed.prize) {
+            const ok = await this.syncCachedBoxToCloud(parsed);
+            if (ok) synced++;
+          }
+        } catch {
+          // ignore malformed entry
+        }
+      }
+    } catch {
+      // ignore storage errors
+    }
+    return synced;
   },
 
   async forceSyncServerDashboard(): Promise<{
@@ -2677,8 +2819,8 @@ export const apiClient = {
     const [profileSnap, templatesSnap, prizesSnap, pricesSnap] = await Promise.all([
       getDocFromServer(doc(db, 'publicConfig', 'labProfile')).catch(() => null),
       getDocFromServer(doc(db, 'adminSettings', 'templates')).catch(() => null),
-      getDocsFromServer(collection(db, 'prizes')),
-      getDocsFromServer(collection(db, 'prices')),
+      getDocsFromServer(collection(db, 'prizes')).catch(() => null),
+      getDocsFromServer(collection(db, 'prices')).catch(() => null),
     ]);
 
     let labProfile: LabProfile = { ...DEFAULT_LAB_PROFILE };
@@ -2695,9 +2837,10 @@ export const apiClient = {
       );
     }
 
-    const prizes: Prize[] = prizesSnap.empty
-      ? DEFAULT_PRIZES
-      : prizesSnap.docs.map((d) => {
+    const prizes: Prize[] =
+      !prizesSnap || prizesSnap.empty
+        ? DEFAULT_PRIZES
+        : prizesSnap.docs.map((d) => {
           const data = d.data();
           const title = String(data.title || '');
           const category = (data.category as PrizeCategory) || 'DISCOUNT';
@@ -2749,7 +2892,8 @@ export const apiClient = {
         return tb - ta;
       });
 
-    const priceOverrides: LabPriceItem[] = pricesSnap.docs.map((d) => {
+    const priceOverrides: LabPriceItem[] = pricesSnap
+      ? pricesSnap.docs.map((d) => {
       const data = d.data();
       return {
         id: d.id,
@@ -2762,7 +2906,8 @@ export const apiClient = {
         duration: data.duration ? String(data.duration) : undefined,
         active: data.active !== false,
       };
-    });
+        })
+      : [];
     const prices = mergePricesWithInitial(priceOverrides);
 
     const usedMap = new Map<string, number>();
@@ -2796,6 +2941,7 @@ export const apiClient = {
       prizeTitle: string;
       discountLabel?: string;
       prizeCode?: string;
+      boxToken?: string;
       branchName?: string;
       status?: 'opened' | 'redeemed';
       validHours?: number;
@@ -2805,6 +2951,9 @@ export const apiClient = {
   ): Promise<{ ok: boolean; importedCount: number; skippedDuplicates: number }> {
     const existingCodes = new Set(
       existingLinks.map((l) => (l.prizeCode || '').trim().toUpperCase()).filter(Boolean)
+    );
+    const existingTokens = new Set(
+      existingLinks.map((l) => (l.token || l.id || '').trim().toUpperCase()).filter(Boolean)
     );
     const allPrizes = prizesCatalog.length > 0 ? prizesCatalog : DEFAULT_PRIZES;
     let importedCount = 0;
@@ -2823,7 +2972,8 @@ export const apiClient = {
           if (!cleanName || !cleanPrizeTitle) continue;
 
           const codeUpper = String(item.prizeCode || '').trim().toUpperCase();
-          if (codeUpper && existingCodes.has(codeUpper)) {
+          const tokenUpper = item.boxToken ? normalizeId(item.boxToken) : '';
+          if ((codeUpper && existingCodes.has(codeUpper)) || (tokenUpper && existingTokens.has(tokenUpper))) {
             skippedDuplicates++;
             continue;
           }
@@ -2851,7 +3001,8 @@ export const apiClient = {
               buildDefaultPrizeTerms({ title: cleanPrizeTitle, category, validHours })
           ).slice(0, 1000);
 
-          const token = randomCode('RTBOX-', 6);
+          const token = tokenUpper || randomCode('RTBOX-', 6);
+          existingTokens.add(token);
           const prizeCode = (codeUpper || randomCode('RTWIN-', 6)).slice(0, 64);
           existingCodes.add(prizeCode);
           const openedAt = new Date(now).toISOString();

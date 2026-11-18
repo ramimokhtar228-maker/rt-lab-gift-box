@@ -204,6 +204,7 @@ export function buildPatientClaimWhatsAppUrl(box: BoxPublicResponse, lab: LabPro
   let text = applyTemplate(lab.whatsappPatientClaimTemplate, {
     labName: lab.labName,
     clientName: box.clientName,
+    boxToken: box.token,
     prizeTitle: box.prize?.title || '',
     discountLabel: box.prize?.discountLabel || '',
     prizeCode: box.prize?.prizeCode || '',
@@ -214,6 +215,9 @@ export function buildPatientClaimWhatsAppUrl(box: BoxPublicResponse, lab: LabPro
     hotlineNumber: lab.hotlineNumber,
     prizeTerms,
   });
+  if (!lab.whatsappPatientClaimTemplate.includes('{boxToken}') && box.token) {
+    text = `${text}\nرقم الصندوق: ${box.token}`;
+  }
   if (!lab.whatsappPatientClaimTemplate.includes('{prizeTerms}') && prizeTerms) {
     text = `${text}\n\n📋 شروط الجائزة وضوابط الاستفادة الكاملة:\n${prizeTerms}`;
   }
