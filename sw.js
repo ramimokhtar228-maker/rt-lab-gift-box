@@ -93,7 +93,7 @@ define(['./workbox-b1bafff1'], (function (workbox) { 'use strict';
     "revision": "2dc1d31eada272c55bbfd1febadbb758"
   }, {
     "url": "index.html",
-    "revision": "70ce1662a9ca274df77df044eaf3e1c3"
+    "revision": "384bb70836f26b7a259a3affc80072b3"
   }, {
     "url": "icon.svg",
     "revision": "f7223aade1a49bb1ab9bcc794d747b25"
@@ -113,10 +113,10 @@ define(['./workbox-b1bafff1'], (function (workbox) { 'use strict';
     "url": "assets/opened_happiness_box_1794768644943-BA832AjR.jpg",
     "revision": null
   }, {
-    "url": "assets/index-CUPYJ28N.css",
+    "url": "assets/index-BsXRJF0Z.css",
     "revision": null
   }, {
-    "url": "assets/index-BxQ59H6k.js",
+    "url": "assets/index-BpgMizJ8.js",
     "revision": null
   }, {
     "url": "assets/aistudio/Screenshot_20261116-083349_Chrome_2fb9fcd6.jpg",
