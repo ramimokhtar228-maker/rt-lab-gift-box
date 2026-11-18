@@ -14,7 +14,7 @@ import {
 } from 'lucide-react';
 import type { AdminDashboardData, AppLang, LabProfile } from '../types';
 import { apiClient } from '../services/apiClient';
-import { copyToClipboard, formatWhatsAppPhone } from '../utils/whatsapp';
+import { copyToClipboard, decodeAdminActivationPayload, formatWhatsAppPhone } from '../utils/whatsapp';
 import { AdminLinksTab } from './AdminLinksTab';
 import { AdminPrizesTab } from './AdminPrizesTab';
 import { AdminAnalyticsTab } from './AdminAnalyticsTab';
@@ -26,6 +26,8 @@ type AdminTab = 'links' | 'prizes' | 'analytics' | 'settings' | 'prices';
 interface AdminPanelViewProps {
   shareBaseUrl: string;
   lang: AppLang;
+  pendingActivateCode?: string | null;
+  onActivationHandled?: () => void;
   onLogout: () => void;
   onProfileUpdated: (profile: LabProfile) => void;
   onPreviewBox: (token?: string) => void;
@@ -34,6 +36,8 @@ interface AdminPanelViewProps {
 export function AdminPanelView({
   shareBaseUrl,
   lang,
+  pendingActivateCode,
+  onActivationHandled,
   onLogout,
   onProfileUpdated,
   onPreviewBox,
@@ -41,6 +45,7 @@ export function AdminPanelView({
   const [tab, setTab] = useState<AdminTab>('links');
   const [data, setData] = useState<AdminDashboardData | null>(() => apiClient.getCachedDashboard());
   const [loading, setLoading] = useState<boolean>(() => !apiClient.getCachedDashboard());
+  const handledActivateRef = useRef<string | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<'admin' | 'patient' | null>(null);
@@ -171,6 +176,34 @@ export function AdminPanelView({
   const handleTabRefresh = useCallback(async () => {
     await runForceSync(true);
   }, [runForceSync]);
+
+  useEffect(() => {
+    if (!pendingActivateCode || handledActivateRef.current === pendingActivateCode) return;
+    if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+    const payload = decodeAdminActivationPayload(pendingActivateCode);
+    if (!payload) {
+      handledActivateRef.current = pendingActivateCode;
+      onActivationHandled?.();
+      return;
+    }
+    handledActivateRef.current = pendingActivateCode;
+    void (async () => {
+      try {
+        const res = await apiClient.activateBookingFromPayload(payload, data?.prizes || []);
+        await runForceSync(true);
+        if (res.action === 'already_active') {
+          showToast(`حجز المريض (${res.clientName}) مفعّل وموجود بالفعل في سجل البرنامج.`);
+        } else {
+          showToast(`تم تفعيل حجز المريض (${res.clientName}) في البرنامج بنجاح!`);
+        }
+      } catch (err) {
+        console.error('Auto-activation failed:', err);
+        showToast('تعذر تفعيل الحجز تلقائياً — يمكنك لصق رسالة الواتساب في أداة الاستيراد.', true);
+      } finally {
+        onActivationHandled?.();
+      }
+    })();
+  }, [pendingActivateCode, data?.prizes, onActivationHandled, runForceSync, showToast]);
 
   if (loading || !data) {
     return (

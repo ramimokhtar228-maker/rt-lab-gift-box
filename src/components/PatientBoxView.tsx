@@ -82,6 +82,8 @@ export function PatientBoxView({
   const [copiedRef, setCopiedRef] = useState(false);
   const [muted, setMuted] = useState(false);
   const [openedImgError, setOpenedImgError] = useState(false);
+  const [cloudSynced, setCloudSynced] = useState<boolean | null>(null);
+  const [retryingCloud, setRetryingCloud] = useState(false);
   const [, setTick] = useState(0);
 
   // Interactive game state
@@ -139,7 +141,7 @@ export function PatientBoxView({
           }
           if (cachedParsed) {
             setBox(cachedParsed);
-            void apiClient.syncCachedBoxToCloud(cachedParsed);
+            void apiClient.syncCachedBoxToCloud(cachedParsed).then((ok) => setCloudSynced(ok));
             return;
           }
           setBox(null);
@@ -151,11 +153,14 @@ export function PatientBoxView({
           cachedParsed.prize
         ) {
           setBox(cachedParsed);
-          void apiClient.syncCachedBoxToCloud(cachedParsed);
+          void apiClient.syncCachedBoxToCloud(cachedParsed).then((ok) => setCloudSynced(ok));
         } else {
           setBox(data.box);
           if (data.fromLocalCache && (data.box.status === 'opened' || data.box.status === 'redeemed')) {
-            void apiClient.syncCachedBoxToCloud(data.box);
+            setCloudSynced(false);
+            void apiClient.syncCachedBoxToCloud(data.box).then((ok) => setCloudSynced(ok));
+          } else if (data.box.status === 'opened' || data.box.status === 'redeemed') {
+            setCloudSynced(true);
           }
           if (
             (data.box.status === 'opened' || data.box.status === 'redeemed') &&
@@ -233,6 +238,7 @@ export function PatientBoxView({
         setErrorMsg(data.message || 'تعذر فتح الصندوق حالياً.');
       } else {
         setBox(data.box);
+        setCloudSynced(data.cloudSynced ?? !data.alreadyClaimed ? Boolean(data.cloudSynced ?? true) : true);
         if (data.alreadyClaimed && data.message) {
           setAlreadyClaimedMsg(data.message);
           onBoxAssigned(data.box.token);
@@ -285,6 +291,7 @@ export function PatientBoxView({
         setErrorMsg(data.message || 'تعذر فتح الصندوق.');
       } else {
         setBox(data.box);
+        setCloudSynced(data.alreadyClaimed ? true : Boolean(data.cloudSynced));
         if (data.alreadyClaimed && data.message) {
           setAlreadyClaimedMsg(data.message);
         }
@@ -626,8 +633,70 @@ export function PatientBoxView({
                   </button>
                 </div>
 
+                {cloudSynced === false ? (
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-amber-300 bg-amber-50 px-3.5 py-2.5 text-xs text-amber-950">
+                    <span className="font-bold">
+                      {lang === 'en'
+                        ? 'Saved locally — tap Retry Sync or send WhatsApp to confirm activation.'
+                        : 'تم حفظ جائزتك محلياً — اضغط إعادة المزامنة أو أرسل رسالة الواتساب لتأكيد التفعيل فوراً.'}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={retryingCloud}
+                      onClick={async () => {
+                        if (!box || retryingCloud) return;
+                        setRetryingCloud(true);
+                        try {
+                          let savedPhone = selfPhone.trim();
+                          if (!savedPhone) {
+                            try {
+                              savedPhone =
+                                window.localStorage.getItem(`rt_hb_phone_${box.token.toUpperCase()}`) || '';
+                            } catch {
+                              // ignore
+                            }
+                          }
+                          const ok = await apiClient.syncCachedBoxToCloud(box, savedPhone);
+                          setCloudSynced(ok);
+                        } finally {
+                          setRetryingCloud(false);
+                        }
+                      }}
+                      className="rounded-xl bg-[#5C1422] px-3 py-1.5 text-[11px] font-extrabold text-white hover:bg-[#7A1C2E] disabled:opacity-60 cursor-pointer"
+                    >
+                      {retryingCloud
+                        ? lang === 'en'
+                          ? 'Syncing...'
+                          : 'جاري المزامنة...'
+                        : lang === 'en'
+                          ? 'Retry Sync'
+                          : 'إعادة مزامنة الحجز الآن'}
+                    </button>
+                  </div>
+                ) : cloudSynced === true ? (
+                  <div className="flex items-center gap-2 rounded-2xl border border-emerald-200 bg-emerald-50/70 px-3.5 py-2 text-xs font-bold text-emerald-900">
+                    <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-700" />
+                    <span>
+                      {lang === 'en'
+                        ? 'Your prize booking is registered in RT LAB system.'
+                        : 'تم تسجيل وتفعيل حجز جائزتك بنجاح في نظام معامل RT.'}
+                    </span>
+                  </div>
+                ) : null}
+
                 <a
-                  href={buildPatientClaimWhatsAppUrl(box, labProfile)}
+                  href={(() => {
+                    let savedPhone = selfPhone.trim();
+                    if (!savedPhone && box) {
+                      try {
+                        savedPhone =
+                          window.localStorage.getItem(`rt_hb_phone_${box.token.toUpperCase()}`) || '';
+                      } catch {
+                        // ignore
+                      }
+                    }
+                    return buildPatientClaimWhatsAppUrl(box, labProfile, savedPhone);
+                  })()}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="flex min-h-[50px] w-full items-center justify-center gap-2 rounded-2xl bg-[#5C1422] px-6 py-3.5 text-sm font-extrabold text-white shadow-sm transition-colors hover:bg-[#7A1C2E]"

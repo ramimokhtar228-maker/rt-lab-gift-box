@@ -16,22 +16,43 @@ const BASE_PATH = import.meta.env.BASE_URL || '/';
 const DEFAULT_ASSET_LOGO = `${BASE_PATH}logo.jpg`;
 const DEFAULT_ASSET_ICON = `${BASE_PATH}icon.svg`;
 
+const PENDING_ACTIVATE_STORAGE_KEY = 'rt_hb_pending_activate';
+
 function readInitialUrlState(): {
   token: string | null;
   encodedData: string | null;
   wantsAdmin: boolean;
   referredBy: string | null;
+  activateCode: string | null;
 } {
   if (typeof window === 'undefined') {
-    return { token: null, encodedData: null, wantsAdmin: false, referredBy: null };
+    return { token: null, encodedData: null, wantsAdmin: false, referredBy: null, activateCode: null };
   }
   const params = new URLSearchParams(window.location.search);
   const token = params.get('box') || params.get('token') || params.get('t') || null;
   const encodedData = params.get('d') || null;
   const referredBy = params.get('ref') || null;
+  const urlActivate = params.get('activate') || null;
+  if (urlActivate) {
+    try {
+      window.sessionStorage.setItem(PENDING_ACTIVATE_STORAGE_KEY, urlActivate);
+    } catch {
+      // ignore
+    }
+  }
+  let storedActivate: string | null = null;
+  if (!urlActivate) {
+    try {
+      storedActivate = window.sessionStorage.getItem(PENDING_ACTIVATE_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+  }
+  const activateCode = urlActivate || storedActivate;
   const hash = (window.location.hash || '').toLowerCase();
   const path = (window.location.pathname || '').toLowerCase();
   const wantsAdmin =
+    Boolean(urlActivate) ||
     params.get('view') === 'admin' ||
     params.get('admin') === '1' ||
     params.get('admin') === 'true' ||
@@ -39,7 +60,7 @@ function readInitialUrlState(): {
     hash === '#admin' ||
     hash === '#/admin' ||
     /\/admin\/?$/.test(path);
-  return { token, encodedData, wantsAdmin, referredBy };
+  return { token, encodedData, wantsAdmin, referredBy, activateCode };
 }
 
 class AppErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean }> {
@@ -96,6 +117,7 @@ function AppContent() {
   const [serverShareBaseUrl, setServerShareBaseUrl] = useState<string>('');
   const [boxToken, setBoxToken] = useState<string | null>(initial.token);
   const [encodedBoxData, setEncodedBoxData] = useState<string | null>(initial.encodedData);
+  const [pendingActivateCode, setPendingActivateCode] = useState<string | null>(initial.activateCode);
 
   const [authReady, setAuthReady] = useState(false);
   const [isAdminAuthed, setIsAdminAuthed] = useState(false);
@@ -282,6 +304,16 @@ function AppContent() {
           <AdminPanelView
             shareBaseUrl={publicShareBaseUrl}
             lang={lang}
+            pendingActivateCode={pendingActivateCode}
+            onActivationHandled={() => {
+              setPendingActivateCode(null);
+              try {
+                window.sessionStorage.removeItem(PENDING_ACTIVATE_STORAGE_KEY);
+              } catch {
+                // ignore
+              }
+              syncUrl('admin', null);
+            }}
             onLogout={handleLogout}
             onProfileUpdated={setLabProfile}
             onPreviewBox={(t) => {
@@ -334,6 +366,7 @@ function AppContent() {
       {/* Google Auth Admin Gate Modal */}
       <AdminLoginModal
         isOpen={isLoginModalOpen}
+        pendingActivateCode={pendingActivateCode}
         onClose={() => setIsLoginModalOpen(false)}
         onAuthenticated={handleAuthenticated}
       />

@@ -20,9 +20,9 @@ import {
   resolvePrizeDistributionTier,
 } from '../data/defaultPrizes';
 import { INITIAL_PRICES } from '../data/initialPrices';
-import { db, handleFirestoreError, OperationType } from '../firebase';
+import { auth, db, FIREBASE_DATABASE_ID, FIREBASE_PROJECT_ID, handleFirestoreError, OperationType } from '../firebase';
 import { hashPhoneNumber, normalizeCanonicalPhone } from '../utils/phoneHash';
-import { formatWhatsAppPhone } from '../utils/whatsapp';
+import { formatWhatsAppPhone, type WhatsAppAdminActivationPayload } from '../utils/whatsapp';
 import {
   enqueueOfflineMutation,
   loadCachedBox,
@@ -134,6 +134,120 @@ function normalizeDocId(raw: string): string {
     .trim()
     .replace(/[^a-zA-Z0-9_-]/g, '')
     .slice(0, 128);
+}
+
+function toFirestoreRestValue(val: unknown): Record<string, unknown> {
+  if (val === null || val === undefined) return { nullValue: null };
+  if (typeof val === 'boolean') return { booleanValue: val };
+  if (typeof val === 'number') {
+    if (Number.isInteger(val)) return { integerValue: String(val) };
+    return { doubleValue: val };
+  }
+  if (val instanceof Date) return { timestampValue: val.toISOString() };
+  return { stringValue: String(val) };
+}
+
+function toFirestoreRestFields(obj: Record<string, unknown>): Record<string, unknown> {
+  const fields: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (v === undefined) continue;
+    fields[k] = toFirestoreRestValue(v);
+  }
+  return fields;
+}
+
+async function withCommitTimeout<T>(promise: Promise<T>, timeoutMs = 7000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Firestore commit timeout')), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function commitGiftLinkViaRest(writes: Array<Record<string, unknown>>): Promise<void> {
+  const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(FIREBASE_PROJECT_ID)}/databases/${encodeURIComponent(FIREBASE_DATABASE_ID)}/documents:commit`;
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  try {
+    const idToken = await auth.currentUser?.getIdToken();
+    if (idToken) {
+      headers.Authorization = `Bearer ${idToken}`;
+    }
+  } catch {
+    // public patient flow commits unauthenticated per rules
+  }
+  const res = await fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ writes }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`REST commit failed (${res.status}): ${text}`);
+  }
+}
+
+function restDocPath(relativePath: string): string {
+  return `projects/${FIREBASE_PROJECT_ID}/databases/${FIREBASE_DATABASE_ID}/documents/${relativePath}`;
+}
+
+async function restCreateGiftLinkAndContact(
+  token: string,
+  linkFields: Record<string, unknown>,
+  clientPhone: string
+): Promise<void> {
+  await commitGiftLinkViaRest([
+    {
+      update: {
+        name: restDocPath(`giftLinks/${token}`),
+        fields: toFirestoreRestFields(linkFields),
+      },
+      updateTransforms: [
+        { fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' },
+        { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
+      ],
+      currentDocument: { exists: false },
+    },
+    {
+      update: {
+        name: restDocPath(`giftLinks/${token}/private/contact`),
+        fields: toFirestoreRestFields({ clientPhone }),
+      },
+      updateTransforms: [
+        { fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' },
+        { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
+      ],
+      currentDocument: { exists: false },
+    },
+  ]);
+}
+
+async function restUpdateGiftLinkToOpened(
+  token: string,
+  updateFields: Record<string, unknown>
+): Promise<void> {
+  const cleanFields: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(updateFields)) {
+    if (v !== undefined) cleanFields[k] = v;
+  }
+  await commitGiftLinkViaRest([
+    {
+      update: {
+        name: restDocPath(`giftLinks/${token}`),
+        fields: toFirestoreRestFields(cleanFields),
+      },
+      updateMask: {
+        fieldPaths: Object.keys(cleanFields),
+      },
+      updateTransforms: [{ fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' }],
+      currentDocument: { exists: true },
+    },
+  ]);
 }
 
 const DELETED_TOKENS_STORAGE_KEY = 'rt_hb_deleted_tokens';
@@ -888,7 +1002,7 @@ export const apiClient = {
     token: string,
     encodedData?: string | null,
     options?: { selectedGameBox?: number; gameMode?: GameMode }
-  ): Promise<{ ok: boolean; alreadyClaimed?: boolean; box?: BoxPublicResponse; message?: string }> {
+  ): Promise<{ ok: boolean; alreadyClaimed?: boolean; cloudSynced?: boolean; box?: BoxPublicResponse; message?: string }> {
     const clean = normalizeId(token);
     if (!clean) {
       return { ok: false, message: 'رابط صندوق السعادة غير صحيح.' };
@@ -910,7 +1024,8 @@ export const apiClient = {
 
     const cachedExisting = loadCachedBox(clean);
     if (cachedExisting && (cachedExisting.status === 'opened' || cachedExisting.status === 'redeemed') && cachedExisting.prize) {
-      return { ok: true, box: cachedExisting };
+      const cloudSynced = await this.syncCachedBoxToCloud(cachedExisting);
+      return { ok: true, cloudSynced, box: cachedExisting };
     }
 
     const linkRef = doc(db, 'giftLinks', clean);
@@ -1006,7 +1121,7 @@ export const apiClient = {
       }
 
       const now = Date.now();
-      const resolvedValidHours = Math.max(1, Number(validHours || 48));
+      const resolvedValidHours = Math.min(2160, Math.max(1, Number(validHours || 48)));
       const openedAt = new Date(now).toISOString();
       const expiresAt = new Date(now + resolvedValidHours * 3600_000).toISOString();
       const finalTerms = (
@@ -1039,8 +1154,7 @@ export const apiClient = {
       const outBox = toPublicBox(updated);
       saveCachedBox(outBox);
 
-      const batch = writeBatch(db);
-      batch.update(linkRef, {
+      const updateFields: Record<string, unknown> = {
         status: 'opened',
         openedAt,
         expiresAt,
@@ -1049,13 +1163,18 @@ export const apiClient = {
           ? { selectedGameBox: options.selectedGameBox }
           : {}),
         prizeId: String(prizeId || 'prz_pre').slice(0, 128),
-        prizeTitle: prizeTitle.slice(0, 200),
+        prizeTitle: (prizeTitle || 'جائزة صندوق السعادة').slice(0, 200),
         prizeDescription: (prizeDescription || '').slice(0, 600),
         prizeTerms: finalTerms,
         prizeDiscountLabel: (prizeDiscountLabel || 'هدية خاصة').slice(0, 80),
         prizeCategory: String(prizeCategory || 'DISCOUNT').slice(0, 40),
         prizeCode: prizeCode.slice(0, 64),
         validHours: resolvedValidHours,
+      };
+
+      const batch = writeBatch(db);
+      batch.update(linkRef, {
+        ...updateFields,
         updatedAt: serverTimestamp(),
       });
       if (phoneHash) {
@@ -1070,38 +1189,35 @@ export const apiClient = {
 
       if (typeof navigator !== 'undefined' && !navigator.onLine) {
         enqueueOfflineMutation('open_box', { box: outBox, clientPhone: decoded?.p || '' });
-        return { ok: true, box: outBox };
+        return { ok: true, cloudSynced: false, box: outBox };
       }
 
+      let cloudSynced = false;
       try {
-        await batch.commit();
+        await withCommitTimeout(batch.commit());
+        cloudSynced = true;
       } catch (err) {
         console.warn('Primary openBox update batch failed, retrying link update without phoneLock:', err);
         try {
-          await updateDoc(linkRef, {
-            status: 'opened',
-            openedAt,
-            expiresAt,
-            gameMode: chosenMode,
-            ...(typeof options?.selectedGameBox === 'number'
-              ? { selectedGameBox: options.selectedGameBox }
-              : {}),
-            prizeId: String(prizeId || 'prz_pre').slice(0, 128),
-            prizeTitle: (prizeTitle || 'جائزة صندوق السعادة').slice(0, 200),
-            prizeDescription: (prizeDescription || '').slice(0, 600),
-            prizeTerms: finalTerms,
-            prizeDiscountLabel: (prizeDiscountLabel || 'هدية خاصة').slice(0, 80),
-            prizeCategory: String(prizeCategory || 'DISCOUNT').slice(0, 40),
-            prizeCode: prizeCode.slice(0, 64),
-            validHours: resolvedValidHours,
-            updatedAt: serverTimestamp(),
-          });
+          await withCommitTimeout(
+            updateDoc(linkRef, {
+              ...updateFields,
+              updatedAt: serverTimestamp(),
+            })
+          );
+          cloudSynced = true;
         } catch (retryErr) {
-          console.warn('Fallback openBox update queued for sync:', retryErr);
-          enqueueOfflineMutation('open_box', { box: outBox, clientPhone: decoded?.p || '' });
+          console.warn('SDK fallback openBox update failed, trying HTTPS REST commit:', retryErr);
+          try {
+            await restUpdateGiftLinkToOpened(clean, updateFields);
+            cloudSynced = true;
+          } catch (restErr) {
+            console.warn('REST fallback openBox update queued for sync:', restErr);
+            enqueueOfflineMutation('open_box', { box: outBox, clientPhone: decoded?.p || '' });
+          }
         }
       }
-      return { ok: true, box: outBox };
+      return { ok: true, cloudSynced, box: outBox };
     }
 
     if (!decoded && clean !== 'RTBOX-DEMO2026') {
@@ -1126,7 +1242,7 @@ export const apiClient = {
     const prizes = await fetchActivePrizes(encodedData);
     const chosen = pickWeightedPrize(prizes);
     const now = Date.now();
-    const validHours = Math.max(1, Number(chosen.validHours || 48));
+    const validHours = Math.min(2160, Math.max(1, Number(chosen.validHours || 48)));
     const openedAt = new Date(now).toISOString();
     const expiresAt = new Date(now + validHours * 3600_000).toISOString();
     const prizeCode = randomCode('RTWIN-', 6);
@@ -1173,11 +1289,10 @@ export const apiClient = {
 
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
       enqueueOfflineMutation('open_box', { box: outBox, clientPhone });
-      return { ok: true, box: outBox };
+      return { ok: true, cloudSynced: false, box: outBox };
     }
 
-    const batch = writeBatch(db);
-    batch.set(linkRef, {
+    const baseCreateFields: Record<string, unknown> = {
       id: clean,
       token: clean,
       clientName,
@@ -1192,7 +1307,6 @@ export const apiClient = {
       loyaltyTier: 'Basic',
       loyaltyPoints: 50,
       referralCode,
-      createdAt: serverTimestamp(),
       expiresAt,
       openedAt,
       redeemedAt: null,
@@ -1204,13 +1318,19 @@ export const apiClient = {
       appointmentAt: null,
       appointmentNote: null,
       prizeId: chosen.id.slice(0, 128),
-      prizeTitle: chosen.title.slice(0, 200),
-      prizeDescription: chosen.description.slice(0, 600),
+      prizeTitle: (chosen.title || 'جائزة صندوق السعادة').slice(0, 200),
+      prizeDescription: (chosen.description || '').slice(0, 600),
       prizeTerms,
-      prizeDiscountLabel: chosen.discountLabel.slice(0, 80),
-      prizeCategory: chosen.category.slice(0, 40),
+      prizeDiscountLabel: (chosen.discountLabel || 'هدية خاصة').slice(0, 80),
+      prizeCategory: String(chosen.category || 'DISCOUNT').slice(0, 40),
       prizeCode,
       validHours,
+    };
+
+    const batch = writeBatch(db);
+    batch.set(linkRef, {
+      ...baseCreateFields,
+      createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     });
     batch.set(doc(db, 'giftLinks', clean, 'private', 'contact'), {
@@ -1228,46 +1348,17 @@ export const apiClient = {
       });
     }
 
+    let cloudSynced = false;
     try {
-      await batch.commit();
+      await withCommitTimeout(batch.commit());
+      cloudSynced = true;
     } catch (err) {
       console.warn('Primary openBox create batch failed, retrying without phoneLock:', err);
       try {
         const fallbackBatch = writeBatch(db);
         fallbackBatch.set(linkRef, {
-          id: clean,
-          token: clean,
-          clientName,
-          visitRef,
-          branchName,
-          ...(decodedPhoneHash ? { phoneHash: decodedPhoneHash } : {}),
-          status: 'opened',
-          gameMode: chosenMode,
-          ...(typeof options?.selectedGameBox === 'number'
-            ? { selectedGameBox: options.selectedGameBox }
-            : {}),
-          loyaltyTier: 'Basic',
-          loyaltyPoints: 50,
-          referralCode,
+          ...baseCreateFields,
           createdAt: serverTimestamp(),
-          expiresAt,
-          openedAt,
-          redeemedAt: null,
-          redeemedBy: null,
-          cancelledAt: null,
-          cancelledBy: null,
-          invoiceAmount: null,
-          rewardCost: null,
-          appointmentAt: null,
-          appointmentNote: null,
-          prizeId: chosen.id.slice(0, 128),
-          prizeTitle: (chosen.title || 'جائزة صندوق السعادة').slice(0, 200),
-          prizeDescription: (chosen.description || '').slice(0, 600),
-          prizeTerms,
-          prizeDiscountLabel: (chosen.discountLabel || 'هدية خاصة').slice(0, 80),
-          prizeCategory: String(chosen.category || 'DISCOUNT').slice(0, 40),
-          prizeCode,
-          validHours,
           updatedAt: serverTimestamp(),
         });
         fallbackBatch.set(doc(db, 'giftLinks', clean, 'private', 'contact'), {
@@ -1275,14 +1366,21 @@ export const apiClient = {
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
-        await fallbackBatch.commit();
+        await withCommitTimeout(fallbackBatch.commit());
+        cloudSynced = true;
       } catch (retryErr) {
-        console.warn('Fallback openBox create queued for sync:', retryErr);
-        enqueueOfflineMutation('open_box', { box: outBox, clientPhone });
+        console.warn('SDK fallback openBox create failed, trying HTTPS REST commit:', retryErr);
+        try {
+          await restCreateGiftLinkAndContact(clean, baseCreateFields, clientPhone);
+          cloudSynced = true;
+        } catch (restErr) {
+          console.warn('REST fallback openBox create queued for sync:', restErr);
+          enqueueOfflineMutation('open_box', { box: outBox, clientPhone });
+        }
       }
     }
 
-    return { ok: true, box: outBox };
+    return { ok: true, cloudSynced, box: outBox };
   },
 
   async createAndOpenSelfBox(payload: {
@@ -1293,7 +1391,7 @@ export const apiClient = {
     selectedGameBox?: number;
     referredBy?: string;
     isBirthdayGift?: boolean;
-  }): Promise<{ ok: boolean; alreadyClaimed?: boolean; box?: BoxPublicResponse; message?: string }> {
+  }): Promise<{ ok: boolean; alreadyClaimed?: boolean; cloudSynced?: boolean; box?: BoxPublicResponse; message?: string }> {
     const cleanName = payload.clientName.trim().slice(0, 120);
     const canonicalPhone = normalizeCanonicalPhone(payload.clientPhone).slice(0, 40);
     if (!cleanName || canonicalPhone.length < 8) {
@@ -1338,7 +1436,7 @@ export const apiClient = {
     const prizes = await fetchActivePrizes();
     const chosen = pickWeightedPrize(prizes);
     const now = Date.now();
-    const validHours = Math.max(1, Number(chosen.validHours || 48));
+    const validHours = Math.min(2160, Math.max(1, Number(chosen.validHours || 48)));
     const openedAt = new Date(now).toISOString();
     const expiresAt = new Date(now + validHours * 3600_000).toISOString();
     const token = randomCode('RTBOX-', 6);
@@ -1388,10 +1486,10 @@ export const apiClient = {
 
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
       enqueueOfflineMutation('open_box', { box: outBox, clientPhone: canonicalPhone });
-      return { ok: true, box: outBox };
+      return { ok: true, cloudSynced: false, box: outBox };
     }
 
-    const docPayload = {
+    const baseDocFields: Record<string, unknown> = {
       id: token,
       token,
       clientName: cleanName,
@@ -1408,7 +1506,6 @@ export const apiClient = {
       referralCode,
       ...(referredBy ? { referredBy } : {}),
       isBirthdayGift,
-      createdAt: serverTimestamp(),
       expiresAt,
       openedAt,
       redeemedAt: null,
@@ -1427,6 +1524,10 @@ export const apiClient = {
       prizeCategory: String(chosen.category || 'DISCOUNT').slice(0, 40),
       prizeCode,
       validHours,
+    };
+    const docPayload = {
+      ...baseDocFields,
+      createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     };
     const contactPayload = {
@@ -1448,22 +1549,31 @@ export const apiClient = {
       });
     }
 
+    let cloudSynced = false;
     try {
-      await batch.commit();
+      await withCommitTimeout(batch.commit());
+      cloudSynced = true;
     } catch (err) {
       console.warn('Primary self-box batch commit failed, retrying giftLink+contact without phoneLock:', err);
       try {
         const fallbackBatch = writeBatch(db);
         fallbackBatch.set(doc(db, 'giftLinks', token), docPayload);
         fallbackBatch.set(doc(db, 'giftLinks', token, 'private', 'contact'), contactPayload);
-        await fallbackBatch.commit();
+        await withCommitTimeout(fallbackBatch.commit());
+        cloudSynced = true;
       } catch (retryErr) {
-        console.warn('Fallback self-box commit queued for sync:', retryErr);
-        enqueueOfflineMutation('open_box', { box: outBox, clientPhone: canonicalPhone });
+        console.warn('SDK fallback self-box commit failed, trying HTTPS REST commit:', retryErr);
+        try {
+          await restCreateGiftLinkAndContact(token, baseDocFields, canonicalPhone);
+          cloudSynced = true;
+        } catch (restErr) {
+          console.warn('REST fallback self-box commit queued for sync:', restErr);
+          enqueueOfflineMutation('open_box', { box: outBox, clientPhone: canonicalPhone });
+        }
       }
     }
 
-    return { ok: true, box: outBox };
+    return { ok: true, cloudSynced, box: outBox };
   },
 
   async ensureInitialSeed(): Promise<void> {
@@ -2584,63 +2694,70 @@ export const apiClient = {
       }
 
       const batch = writeBatch(db);
+      const updateFields: Record<string, unknown> = {
+        status: 'opened',
+        openedAt,
+        expiresAt,
+        gameMode: cachedBox.gameMode || 'box',
+        ...(typeof cachedBox.selectedGameBox === 'number'
+          ? { selectedGameBox: cachedBox.selectedGameBox }
+          : {}),
+        prizeId: 'prz_cached',
+        prizeTitle: (cachedBox.prize.title || 'جائزة صندوق السعادة').slice(0, 200),
+        prizeDescription: (cachedBox.prize.description || '').slice(0, 600),
+        prizeTerms,
+        prizeDiscountLabel: (cachedBox.prize.discountLabel || 'هدية خاصة').slice(0, 80),
+        prizeCategory: String(cachedBox.prize.category || 'DISCOUNT').slice(0, 40),
+        prizeCode: (cachedBox.prize.prizeCode || randomCode('RTWIN-', 6)).slice(0, 64),
+        validHours,
+      };
+      const canonicalPhone = normalizeCanonicalPhone(resolvedPhone);
+      const phoneHash = canonicalPhone.length >= 8 ? await hashPhoneNumber(canonicalPhone) : '';
+      const createFields: Record<string, unknown> = {
+        id: clean,
+        token: clean,
+        clientName: String(cachedBox.clientName || 'عميلنا العزيز').slice(0, 120),
+        visitRef: String(cachedBox.visitRef || `RT-${Math.floor(1000 + Math.random() * 9000)}`).slice(0, 64),
+        branchName: String(cachedBox.branchName || DEFAULT_LAB_PROFILE.branches[0]).slice(0, 160),
+        ...(phoneHash ? { phoneHash } : {}),
+        status: 'opened',
+        gameMode: cachedBox.gameMode || 'box',
+        ...(typeof cachedBox.selectedGameBox === 'number'
+          ? { selectedGameBox: cachedBox.selectedGameBox }
+          : {}),
+        loyaltyTier: cachedBox.loyaltyTier || 'Basic',
+        loyaltyPoints: cachedBox.loyaltyPoints ?? 50,
+        referralCode: cachedBox.referralCode || null,
+        isBirthdayGift: Boolean(cachedBox.isBirthdayGift),
+        expiresAt,
+        openedAt,
+        redeemedAt: null,
+        redeemedBy: null,
+        cancelledAt: null,
+        cancelledBy: null,
+        invoiceAmount: null,
+        rewardCost: null,
+        appointmentAt: null,
+        appointmentNote: null,
+        prizeId: 'prz_cached',
+        prizeTitle: (cachedBox.prize.title || 'جائزة صندوق السعادة').slice(0, 200),
+        prizeDescription: (cachedBox.prize.description || '').slice(0, 600),
+        prizeTerms,
+        prizeDiscountLabel: (cachedBox.prize.discountLabel || 'هدية خاصة').slice(0, 80),
+        prizeCategory: String(cachedBox.prize.category || 'DISCOUNT').slice(0, 40),
+        prizeCode: (cachedBox.prize.prizeCode || randomCode('RTWIN-', 6)).slice(0, 64),
+        validHours,
+      };
+
       if (snap.exists()) {
         batch.update(doc(db, 'giftLinks', clean), {
-          status: 'opened',
-          openedAt,
-          expiresAt,
-          gameMode: cachedBox.gameMode || 'box',
-          ...(typeof cachedBox.selectedGameBox === 'number'
-            ? { selectedGameBox: cachedBox.selectedGameBox }
-            : {}),
-          prizeId: 'prz_cached',
-          prizeTitle: (cachedBox.prize.title || 'جائزة صندوق السعادة').slice(0, 200),
-          prizeDescription: (cachedBox.prize.description || '').slice(0, 600),
-          prizeTerms,
-          prizeDiscountLabel: (cachedBox.prize.discountLabel || 'هدية خاصة').slice(0, 80),
-          prizeCategory: String(cachedBox.prize.category || 'DISCOUNT').slice(0, 40),
-          prizeCode: (cachedBox.prize.prizeCode || randomCode('RTWIN-', 6)).slice(0, 64),
-          validHours,
+          ...updateFields,
           updatedAt: serverTimestamp(),
         });
       } else {
-        const canonicalPhone = normalizeCanonicalPhone(resolvedPhone);
-        const phoneHash = canonicalPhone.length >= 8 ? await hashPhoneNumber(canonicalPhone) : '';
         batch.set(doc(db, 'giftLinks', clean), {
-          id: clean,
-          token: clean,
-          clientName: String(cachedBox.clientName || 'عميلنا العزيز').slice(0, 120),
-          visitRef: String(cachedBox.visitRef || `RT-${Math.floor(1000 + Math.random() * 9000)}`).slice(0, 64),
-          branchName: String(cachedBox.branchName || DEFAULT_LAB_PROFILE.branches[0]).slice(0, 160),
-          ...(phoneHash ? { phoneHash } : {}),
-          status: 'opened',
-          gameMode: cachedBox.gameMode || 'box',
-          ...(typeof cachedBox.selectedGameBox === 'number'
-            ? { selectedGameBox: cachedBox.selectedGameBox }
-            : {}),
-          loyaltyTier: cachedBox.loyaltyTier || 'Basic',
-          loyaltyPoints: cachedBox.loyaltyPoints ?? 50,
-          referralCode: cachedBox.referralCode || null,
-          isBirthdayGift: Boolean(cachedBox.isBirthdayGift),
+          ...createFields,
           createdAt: serverTimestamp(),
-          expiresAt,
-          openedAt,
-          redeemedAt: null,
-          redeemedBy: null,
-          cancelledAt: null,
-          cancelledBy: null,
-          invoiceAmount: null,
-          rewardCost: null,
-          appointmentAt: null,
-          appointmentNote: null,
-          prizeId: 'prz_cached',
-          prizeTitle: (cachedBox.prize.title || 'جائزة صندوق السعادة').slice(0, 200),
-          prizeDescription: (cachedBox.prize.description || '').slice(0, 600),
-          prizeTerms,
-          prizeDiscountLabel: (cachedBox.prize.discountLabel || 'هدية خاصة').slice(0, 80),
-          prizeCategory: String(cachedBox.prize.category || 'DISCOUNT').slice(0, 40),
-          prizeCode: (cachedBox.prize.prizeCode || randomCode('RTWIN-', 6)).slice(0, 64),
-          validHours,
           updatedAt: serverTimestamp(),
         });
         batch.set(doc(db, 'giftLinks', clean, 'private', 'contact'), {
@@ -2649,7 +2766,17 @@ export const apiClient = {
           updatedAt: serverTimestamp(),
         });
       }
-      await batch.commit();
+
+      try {
+        await withCommitTimeout(batch.commit());
+      } catch (sdkErr) {
+        console.warn('SDK syncCachedBoxToCloud failed, trying HTTPS REST commit:', clean, sdkErr);
+        if (snap.exists()) {
+          await restUpdateGiftLinkToOpened(clean, updateFields);
+        } else {
+          await restCreateGiftLinkAndContact(clean, createFields, canonicalPhone || '');
+        }
+      }
       return true;
     } catch (err) {
       console.warn('syncCachedBoxToCloud deferred:', clean, err);
@@ -2945,18 +3072,25 @@ export const apiClient = {
       branchName?: string;
       status?: 'opened' | 'redeemed';
       validHours?: number;
+      openedAt?: string;
+      expiresAt?: string;
+      visitRef?: string;
     }>,
     existingLinks: GiftLink[],
     prizesCatalog: Prize[]
-  ): Promise<{ ok: boolean; importedCount: number; skippedDuplicates: number }> {
-    const existingCodes = new Set(
-      existingLinks.map((l) => (l.prizeCode || '').trim().toUpperCase()).filter(Boolean)
-    );
-    const existingTokens = new Set(
-      existingLinks.map((l) => (l.token || l.id || '').trim().toUpperCase()).filter(Boolean)
-    );
+  ): Promise<{ ok: boolean; importedCount: number; upgradedCount: number; skippedDuplicates: number }> {
+    const activeByCode = new Map<string, GiftLink>();
+    const activeByToken = new Map<string, GiftLink>();
+    for (const l of existingLinks) {
+      const codeKey = (l.prizeCode || '').trim().toUpperCase();
+      const tokKey = (l.token || l.id || '').trim().toUpperCase();
+      if (codeKey) activeByCode.set(codeKey, l);
+      if (tokKey) activeByToken.set(tokKey, l);
+    }
+
     const allPrizes = prizesCatalog.length > 0 ? prizesCatalog : DEFAULT_PRIZES;
     let importedCount = 0;
+    let upgradedCount = 0;
     let skippedDuplicates = 0;
 
     try {
@@ -2973,7 +3107,12 @@ export const apiClient = {
 
           const codeUpper = String(item.prizeCode || '').trim().toUpperCase();
           const tokenUpper = item.boxToken ? normalizeId(item.boxToken) : '';
-          if ((codeUpper && existingCodes.has(codeUpper)) || (tokenUpper && existingTokens.has(tokenUpper))) {
+          const matchedExisting =
+            (tokenUpper && activeByToken.get(tokenUpper)) ||
+            (codeUpper && activeByCode.get(codeUpper)) ||
+            undefined;
+
+          if (matchedExisting && matchedExisting.status !== 'pending') {
             skippedDuplicates++;
             continue;
           }
@@ -3001,21 +3140,61 @@ export const apiClient = {
               buildDefaultPrizeTerms({ title: cleanPrizeTitle, category, validHours })
           ).slice(0, 1000);
 
-          const token = tokenUpper || randomCode('RTBOX-', 6);
-          existingTokens.add(token);
-          const prizeCode = (codeUpper || randomCode('RTWIN-', 6)).slice(0, 64);
-          existingCodes.add(prizeCode);
-          const openedAt = new Date(now).toISOString();
-          const expiresAt = new Date(now + validHours * 3600_000).toISOString();
+          const openedAt =
+            item.openedAt && !Number.isNaN(new Date(item.openedAt).getTime())
+              ? item.openedAt.slice(0, 64)
+              : new Date(now).toISOString();
+          const expiresAt =
+            item.expiresAt && !Number.isNaN(new Date(item.expiresAt).getTime())
+              ? item.expiresAt.slice(0, 64)
+              : new Date(now + validHours * 3600_000).toISOString();
           const canonicalPhone = normalizeCanonicalPhone(String(item.clientPhone || '')).slice(0, 40);
           const phoneHash = canonicalPhone.length >= 8 ? await hashPhoneNumber(canonicalPhone) : '';
           const status = item.status === 'redeemed' ? 'redeemed' : 'opened';
+          const prizeCode = (codeUpper || matchedExisting?.prizeCode || randomCode('RTWIN-', 6)).slice(0, 64);
+
+          if (matchedExisting && matchedExisting.status === 'pending') {
+            const targetId = matchedExisting.id;
+            batch.update(doc(db, 'giftLinks', targetId), {
+              status,
+              openedAt,
+              expiresAt,
+              redeemedAt: status === 'redeemed' ? openedAt : null,
+              redeemedBy: status === 'redeemed' ? 'تفعيل من الإدارة' : null,
+              prizeId: (matchedPrize?.id || matchedExisting.prizeId || 'prz_imported').slice(0, 128),
+              prizeTitle: cleanPrizeTitle,
+              prizeDescription: description,
+              prizeTerms,
+              prizeDiscountLabel: discountLabel,
+              prizeCategory: String(category).slice(0, 40),
+              prizeCode,
+              validHours,
+              updatedAt: serverTimestamp(),
+            });
+            if (canonicalPhone && !matchedExisting.clientPhone) {
+              batch.update(doc(db, 'giftLinks', targetId, 'private', 'contact'), {
+                clientPhone: canonicalPhone,
+                updatedAt: serverTimestamp(),
+              });
+            }
+            activeByToken.set(targetId.toUpperCase(), { ...matchedExisting, status });
+            activeByCode.set(prizeCode.toUpperCase(), { ...matchedExisting, status });
+            upgradedCount++;
+            batchOps++;
+            continue;
+          }
+
+          const token = tokenUpper || randomCode('RTBOX-', 6);
+          const visitRef = String(item.visitRef || `RT-${Math.floor(1000 + Math.random() * 9000)}`).slice(0, 64);
+          const newStub = { id: token, token, prizeCode, status } as GiftLink;
+          activeByToken.set(token, newStub);
+          activeByCode.set(prizeCode, newStub);
 
           batch.set(doc(db, 'giftLinks', token), {
             id: token,
             token,
             clientName: cleanName,
-            visitRef: `RT-${Math.floor(1000 + Math.random() * 9000)}`,
+            visitRef,
             branchName: String(item.branchName || DEFAULT_LAB_PROFILE.branches[0]).slice(0, 160),
             ...(phoneHash ? { phoneHash } : {}),
             status,
@@ -3067,9 +3246,52 @@ export const apiClient = {
         }
       }
 
-      return { ok: true, importedCount, skippedDuplicates };
+      return { ok: true, importedCount, upgradedCount, skippedDuplicates };
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, 'giftLinks/importRecovered');
     }
+  },
+
+  async activateBookingFromPayload(
+    payload: WhatsAppAdminActivationPayload,
+    prizesCatalog: Prize[]
+  ): Promise<{ ok: boolean; action: 'activated' | 'upgraded' | 'already_active'; clientName: string }> {
+    const token = normalizeId(payload.token);
+    if (!token) {
+      throw new Error('رقم الصندوق غير صالح للتفعيل.');
+    }
+    const serverLinksSnap = await getDocsFromServer(collection(db, 'giftLinks')).catch(() => null);
+    const existingLinks = serverLinksSnap
+      ? serverLinksSnap.docs.map((d) => docToGiftLink(d.id, d.data()))
+      : [];
+    const existingByToken = existingLinks.find((l) => l.token.toUpperCase() === token);
+    if (existingByToken && (existingByToken.status === 'opened' || existingByToken.status === 'redeemed')) {
+      return { ok: true, action: 'already_active', clientName: existingByToken.clientName };
+    }
+    const res = await this.importRecoveredBookings(
+      [
+        {
+          boxToken: token,
+          clientName: payload.clientName,
+          clientPhone: payload.clientPhone,
+          prizeTitle: payload.prizeTitle,
+          discountLabel: payload.discountLabel,
+          prizeCode: payload.prizeCode,
+          branchName: payload.branchName,
+          visitRef: payload.visitRef,
+          openedAt: payload.openedAt,
+          expiresAt: payload.expiresAt,
+          validHours: payload.validHours,
+          status: 'opened',
+        },
+      ],
+      existingLinks,
+      prizesCatalog
+    );
+    return {
+      ok: true,
+      action: res.upgradedCount > 0 ? 'upgraded' : res.importedCount > 0 ? 'activated' : 'already_active',
+      clientName: payload.clientName,
+    };
   },
 };

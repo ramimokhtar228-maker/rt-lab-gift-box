@@ -28,6 +28,7 @@ import {
   buildAdminWinnerReplyWhatsAppUrl,
   buildBoxUrl,
   copyToClipboard,
+  decodeAdminActivationPayload,
   exportLinksExcelCsv,
   formatArabicDate,
   formatWhatsAppPhone,
@@ -243,26 +244,39 @@ export function AdminLinksTab({
   };
 
   const parsedWhatsAppBookings = useMemo(() => {
-    const raw = recoveryText.trim();
+    const raw = recoveryText.replace(/[\u200e\u200f\u202a-\u202e\ufeff]/g, '').trim();
     if (!raw) return [];
 
-    const blocks = raw
-      .split(/(?=مرحباً\s)|(?=الاسم\s*[:：])|\n{2,}(?=[^\n]*(?:الاسم\s*[:：]|الجائزة\s*[:：]|RTWIN-))/g)
-      .reduce<string[]>((acc, chunk) => {
-        const trimmed = chunk.trim();
-        if (!trimmed) return acc;
-        if (
-          acc.length > 0 &&
-          /^مرحباً/i.test(acc[acc.length - 1]) &&
-          !/الاسم\s*[:：]/.test(acc[acc.length - 1]) &&
-          /^الاسم\s*[:：]/.test(trimmed)
-        ) {
-          acc[acc.length - 1] = `${acc[acc.length - 1]}\n${trimmed}`;
-        } else {
-          acc.push(trimmed);
-        }
-        return acc;
-      }, []);
+    // Normalize WhatsApp copy-paste message headers so timestamp+sender stay attached to the following message
+    const lines = raw.split(/\r?\n/);
+    const blocks: string[] = [];
+    let currentLines: string[] = [];
+
+    const isWaHeaderLine = (line: string) =>
+      /^\[?\d{1,4}[/.-]\d{1,4}(?:[/.-]\d{2,4})?,?\s+\d{1,2}:\d{2}(?:\s*[APMapmصم]{1,2})?\]?(?:\s*-\s*|\s+).+?:/.test(
+        line.trim()
+      );
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      const startsNewByHeader = isWaHeaderLine(trimmed);
+      const startsNewByGreeting =
+        /^مرحباً\s/i.test(trimmed) &&
+        currentLines.some((l) => /الاسم\s*[:：]|الجائزة\s*[:：]|RTWIN-|RTBOX-/i.test(l));
+      const startsNewByName =
+        /^الاسم\s*[:：]/.test(trimmed) &&
+        currentLines.some((l) => /الاسم\s*[:：]/.test(l) && /الجائزة\s*[:：]|RTWIN-|RTBOX-/i.test(currentLines.join('\n')));
+
+      if ((startsNewByHeader || startsNewByGreeting || startsNewByName) && currentLines.length > 0) {
+        blocks.push(currentLines.join('\n'));
+        currentLines = [line];
+      } else {
+        currentLines.push(line);
+      }
+    }
+    if (currentLines.length > 0) {
+      blocks.push(currentLines.join('\n'));
+    }
 
     const results: Array<{
       clientName: string;
@@ -272,10 +286,37 @@ export function AdminLinksTab({
       prizeCode?: string;
       boxToken?: string;
       branchName?: string;
+      openedAt?: string;
+      expiresAt?: string;
+      visitRef?: string;
+      validHours?: number;
       status: 'opened' | 'redeemed';
     }> = [];
 
     for (const block of blocks) {
+      // First check if a 1-tap activation link (?view=admin&activate=...) was pasted inside this message
+      const activateParamMatch = block.match(/[?&]activate=([A-Za-z0-9_-]+)/);
+      if (activateParamMatch) {
+        const decodedAct = decodeAdminActivationPayload(activateParamMatch[1]);
+        if (decodedAct) {
+          results.push({
+            clientName: decodedAct.clientName,
+            clientPhone: decodedAct.clientPhone,
+            prizeTitle: decodedAct.prizeTitle,
+            discountLabel: decodedAct.discountLabel,
+            prizeCode: decodedAct.prizeCode,
+            boxToken: decodedAct.token,
+            branchName: decodedAct.branchName || recoveryBranch || labProfile.branches[0],
+            openedAt: decodedAct.openedAt,
+            expiresAt: decodedAct.expiresAt,
+            visitRef: decodedAct.visitRef,
+            validHours: decodedAct.validHours,
+            status: recoveryStatus,
+          });
+          continue;
+        }
+      }
+
       const nameMatch = block.match(/الاسم\s*[:：]\s*(.+)/);
       const prizeMatch = block.match(/الجائزة\s*[:：]\s*(.+)/);
       const branchMatch = block.match(/الفرع\s*[:：]\s*(.+)/);
@@ -286,8 +327,9 @@ export function AdminLinksTab({
         block.match(/رقم الصندوق\s*[:：]\s*([A-Za-z0-9_-]+)/i) ||
         block.match(/\b(RTBOX-[A-Za-z0-9]+)\b/i);
 
-      const asciiBlock = normalizeArabicDigits(block);
-      const phoneMatch = asciiBlock.match(/(?:\+?2)?(01[0-25]\d{8})/);
+      // Extract Egyptian phone even when formatted with spaces/dashes like "+20 101 234 5678"
+      const compactDigitsBlock = normalizeArabicDigits(block).replace(/[\s\-().]+/g, '');
+      const phoneMatch = compactDigitsBlock.match(/(?:\+?20?|0020?)?(01[0125]\d{8})/);
 
       if (!nameMatch && !prizeMatch && !codeMatch && !boxTokenMatch) continue;
 
@@ -329,9 +371,10 @@ export function AdminLinksTab({
       await onRefresh();
       setRecoveryText('');
       setRecoveryFallbackPhone('');
+      const totalActivated = res.importedCount + res.upgradedCount;
       onNotify(
-        `تم جلب وتفعيل ${res.importedCount} حجز في البرنامج${
-          res.skippedDuplicates > 0 ? ` (وتخطي ${res.skippedDuplicates} مكرر بالكود)` : ''
+        `تم جلب وتفعيل ${totalActivated} حجز في البرنامج${
+          res.skippedDuplicates > 0 ? ` (وتخطي ${res.skippedDuplicates} مكرر مفعل مسبقاً)` : ''
         }.`
       );
     } catch {
@@ -365,7 +408,7 @@ export function AdminLinksTab({
       setManualPhone('');
       setManualPrizeCode('');
       onNotify(
-        res.importedCount > 0
+        res.importedCount + res.upgradedCount > 0
           ? 'تم تسجيل وتفعيل الحجز غير المسمّع بنجاح في السجل.'
           : 'هذا الكود مسجل بالفعل في النظام.'
       );

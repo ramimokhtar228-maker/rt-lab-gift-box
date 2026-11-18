@@ -6,12 +6,14 @@ import { copyToClipboard } from '../utils/whatsapp';
 
 interface AdminLoginModalProps {
   isOpen: boolean;
+  pendingActivateCode?: string | null;
   onClose: () => void;
   onAuthenticated: () => void;
 }
 
 export function AdminLoginModal({
   isOpen,
+  pendingActivateCode,
   onClose,
   onAuthenticated,
 }: AdminLoginModalProps) {
@@ -146,7 +148,9 @@ export function AdminLoginModal({
                       <ExternalLink className="h-3 w-3" />
                     </a>
                     <a
-                      href="https://ais-pre-uktgxyai3tq7v64jdhupar-928451427848.europe-west2.run.app/?view=admin"
+                      href={`https://ais-pre-uktgxyai3tq7v64jdhupar-928451427848.europe-west2.run.app/?view=admin${
+                        pendingActivateCode ? `&activate=${encodeURIComponent(pendingActivateCode)}` : ''
+                      }`}
                       className="inline-flex items-center gap-1 rounded-lg bg-[#5C1422] px-2.5 py-1.5 font-bold text-white hover:bg-[#7A1C2E]"
                     >
                       <span>أو افتح الإدارة فوراً من الرابط المعتمد</span>
@@ -174,7 +178,9 @@ export function AdminLoginModal({
 
           {typeof window !== 'undefined' && window.location.hostname.endsWith('.github.io') ? (
             <a
-              href="https://ais-pre-uktgxyai3tq7v64jdhupar-928451427848.europe-west2.run.app/?view=admin"
+              href={`https://ais-pre-uktgxyai3tq7v64jdhupar-928451427848.europe-west2.run.app/?view=admin${
+                pendingActivateCode ? `&activate=${encodeURIComponent(pendingActivateCode)}` : ''
+              }`}
               className="flex min-h-[44px] w-full items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-[#FAF7F4] px-4 py-2.5 text-xs font-extrabold text-slate-800 transition-colors hover:bg-slate-100"
             >
               <ExternalLink className="h-4 w-4 text-[#5C1422]" />

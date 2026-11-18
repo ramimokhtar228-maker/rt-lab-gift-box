@@ -108,6 +108,84 @@ function encodeBase64UrlUtf8(str: string): string {
   }
 }
 
+function decodeBase64UrlUtf8(encoded: string): string {
+  try {
+    const b64 = encoded.replace(/-/g, '+').replace(/_/g, '/');
+    const pad = b64.length % 4 === 0 ? '' : '='.repeat(4 - (b64.length % 4));
+    const bin = atob(b64 + pad);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) {
+      bytes[i] = bin.charCodeAt(i);
+    }
+    return new TextDecoder().decode(bytes);
+  } catch {
+    return '';
+  }
+}
+
+export interface WhatsAppAdminActivationPayload {
+  token: string;
+  clientName: string;
+  clientPhone?: string;
+  prizeTitle: string;
+  discountLabel?: string;
+  prizeCode?: string;
+  prizeCategory?: PrizeCategory;
+  branchName?: string;
+  visitRef?: string;
+  openedAt?: string;
+  expiresAt?: string;
+  validHours?: number;
+}
+
+export function encodeAdminActivationPayload(payload: WhatsAppAdminActivationPayload): string {
+  return encodeBase64UrlUtf8(
+    JSON.stringify({
+      t: payload.token,
+      n: payload.clientName,
+      ...(payload.clientPhone ? { p: payload.clientPhone } : {}),
+      pt: payload.prizeTitle,
+      ...(payload.discountLabel ? { dl: payload.discountLabel } : {}),
+      ...(payload.prizeCode ? { pc: payload.prizeCode } : {}),
+      ...(payload.prizeCategory ? { cat: payload.prizeCategory } : {}),
+      ...(payload.branchName ? { b: payload.branchName } : {}),
+      ...(payload.visitRef ? { v: payload.visitRef } : {}),
+      ...(payload.openedAt ? { o: payload.openedAt } : {}),
+      ...(payload.expiresAt ? { e: payload.expiresAt } : {}),
+      ...(payload.validHours ? { h: payload.validHours } : {}),
+    })
+  );
+}
+
+export function decodeAdminActivationPayload(encoded: string | null | undefined): WhatsAppAdminActivationPayload | null {
+  if (!encoded) return null;
+  const json = decodeBase64UrlUtf8(encoded.trim());
+  if (!json) return null;
+  try {
+    const raw = JSON.parse(json) as Record<string, unknown>;
+    const token = String(raw.t || '').trim();
+    const clientName = String(raw.n || '').trim();
+    const prizeTitle = String(raw.pt || '').trim();
+    if (!token || !clientName || !prizeTitle) return null;
+    return {
+      token,
+      clientName,
+      clientPhone: raw.p ? String(raw.p) : undefined,
+      prizeTitle,
+      discountLabel: raw.dl ? String(raw.dl) : undefined,
+      prizeCode: raw.pc ? String(raw.pc) : undefined,
+      prizeCategory: raw.cat ? (String(raw.cat) as PrizeCategory) : undefined,
+      branchName: raw.b ? String(raw.b) : undefined,
+      visitRef: raw.v ? String(raw.v) : undefined,
+      openedAt: raw.o ? String(raw.o) : undefined,
+      expiresAt: raw.e ? String(raw.e) : undefined,
+      validHours: typeof raw.h === 'number' ? raw.h : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function buildBoxUrl(
   baseUrl: string,
   token: string,
@@ -193,7 +271,14 @@ function buildFormattedPrizeTermsText(params: {
   return lines.map((line) => `• ${line}`).join('\n');
 }
 
-export function buildPatientClaimWhatsAppUrl(box: BoxPublicResponse, lab: LabProfile): string {
+const AUTHORIZED_ADMIN_APP_BASE =
+  'https://ais-pre-uktgxyai3tq7v64jdhupar-928451427848.europe-west2.run.app';
+
+export function buildPatientClaimWhatsAppUrl(
+  box: BoxPublicResponse,
+  lab: LabProfile,
+  clientPhone?: string
+): string {
   const phone = formatWhatsAppPhone(lab.whatsappNumber || lab.hotlineNumber);
   const prizeTerms = buildFormattedPrizeTermsText({
     title: box.prize?.title,
@@ -220,6 +305,26 @@ export function buildPatientClaimWhatsAppUrl(box: BoxPublicResponse, lab: LabPro
   }
   if (!lab.whatsappPatientClaimTemplate.includes('{prizeTerms}') && prizeTerms) {
     text = `${text}\n\n📋 شروط الجائزة وضوابط الاستفادة الكاملة:\n${prizeTerms}`;
+  }
+
+  if (box.token && box.prize?.title) {
+    const activateCode = encodeAdminActivationPayload({
+      token: box.token,
+      clientName: box.clientName,
+      clientPhone: clientPhone?.trim() || undefined,
+      prizeTitle: box.prize.title,
+      discountLabel: box.prize.discountLabel,
+      prizeCode: box.prize.prizeCode,
+      prizeCategory: box.prize.category,
+      branchName: box.branchName,
+      visitRef: box.visitRef,
+      openedAt: box.openedAt || undefined,
+      expiresAt: box.expiresAt,
+      validHours: box.prize.validHours,
+    });
+    if (activateCode) {
+      text = `${text}\n\n⚡ رابط التفعيل الفوري لإدارة المعمل:\n${AUTHORIZED_ADMIN_APP_BASE}/?view=admin&activate=${activateCode}`;
+    }
   }
   return `https://wa.me/${phone}?text=${encodeURIComponent(text)}`;
 }
