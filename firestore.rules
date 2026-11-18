@@ -39,6 +39,14 @@ service cloud.firestore {
       return !(key in data) || data[key] == null || (data[key] is number && data[key] >= minVal && data[key] <= maxVal);
     }
 
+    function isOptBool(data, key) {
+      return !(key in data) || data[key] == null || data[key] is bool;
+    }
+
+    function isOptMap(data, key) {
+      return !(key in data) || data[key] == null || data[key] is map;
+    }
+
     function isValidPublicLabProfile(data) {
       return data.keys().hasAll([
         'labName',
@@ -66,6 +74,9 @@ service cloud.firestore {
         'logoUrl',
         'whatsappPatientClaimTemplate',
         'shareBaseUrl',
+        'defaultGameMode',
+        'activeCampaign',
+        'distributionTargets',
         'updatedAt'
       ]) &&
       data.labName is string && data.labName.size() >= 1 && data.labName.size() <= 120 &&
@@ -80,6 +91,9 @@ service cloud.firestore {
       data.logoUrl is string && data.logoUrl.size() <= 500000 &&
       data.whatsappPatientClaimTemplate is string && data.whatsappPatientClaimTemplate.size() <= 2000 &&
       data.shareBaseUrl is string && data.shareBaseUrl.size() <= 300 &&
+      isOptStr(data, 'defaultGameMode', 32) &&
+      isOptStr(data, 'activeCampaign', 120) &&
+      isOptMap(data, 'distributionTargets') &&
       data.updatedAt is timestamp;
     }
 
@@ -120,6 +134,9 @@ service cloud.firestore {
         'terms',
         'discountLabel',
         'category',
+        'distributionTier',
+        'estimatedCostEgp',
+        'offerPriceEgp',
         'validHours',
         'weight',
         'stock',
@@ -132,7 +149,10 @@ service cloud.firestore {
       data.description is string && data.description.size() <= 600 &&
       isOptStr(data, 'terms', 1000) &&
       data.discountLabel is string && data.discountLabel.size() >= 1 && data.discountLabel.size() <= 80 &&
-      data.category in ['DISCOUNT', 'FREE_SERVICE', 'PHYSICAL_GIFT', 'SURPRISE', 'discount', 'free_test', 'package', 'home_visit', 'gift'] &&
+      data.category in ['DISCOUNT', 'FREE_SERVICE', 'PHYSICAL_GIFT', 'SURPRISE', 'PAID_OFFER', 'discount', 'free_test', 'package', 'home_visit', 'gift'] &&
+      isOptStr(data, 'distributionTier', 32) &&
+      isOptNum(data, 'estimatedCostEgp', 0, 1000000) &&
+      isOptNum(data, 'offerPriceEgp', 0, 1000000) &&
       data.validHours is number && data.validHours >= 1 && data.validHours <= 2160 &&
       data.weight is number && data.weight >= 1 && data.weight <= 1000 &&
       data.stock is number && data.stock >= 1 && data.stock <= 100000 &&
@@ -161,11 +181,23 @@ service cloud.firestore {
         'branchName',
         'phoneHash',
         'status',
+        'gameMode',
+        'selectedGameBox',
+        'campaignName',
+        'loyaltyTier',
+        'loyaltyPoints',
+        'referralCode',
+        'referredBy',
+        'isBirthdayGift',
         'createdAt',
         'expiresAt',
         'openedAt',
         'redeemedAt',
         'redeemedBy',
+        'cancelledAt',
+        'cancelledBy',
+        'invoiceAmount',
+        'rewardCost',
         'appointmentAt',
         'appointmentNote',
         'prizeId',
@@ -184,12 +216,24 @@ service cloud.firestore {
       data.visitRef is string && data.visitRef.size() <= 64 &&
       data.branchName is string && data.branchName.size() <= 160 &&
       isOptStr(data, 'phoneHash', 64) &&
-      data.status in ['pending', 'opened', 'redeemed', 'expired'] &&
+      data.status in ['pending', 'opened', 'redeemed', 'expired', 'cancelled'] &&
+      isOptStr(data, 'gameMode', 32) &&
+      isOptNum(data, 'selectedGameBox', 0, 10) &&
+      isOptStr(data, 'campaignName', 120) &&
+      isOptStr(data, 'loyaltyTier', 16) &&
+      isOptNum(data, 'loyaltyPoints', 0, 1000000) &&
+      isOptStr(data, 'referralCode', 40) &&
+      isOptStr(data, 'referredBy', 40) &&
+      isOptBool(data, 'isBirthdayGift') &&
       data.createdAt is timestamp &&
       data.expiresAt is string && data.expiresAt.size() >= 10 && data.expiresAt.size() <= 64 &&
       isOptStr(data, 'openedAt', 64) &&
       isOptStr(data, 'redeemedAt', 64) &&
       isOptStr(data, 'redeemedBy', 120) &&
+      isOptStr(data, 'cancelledAt', 64) &&
+      isOptStr(data, 'cancelledBy', 120) &&
+      isOptNum(data, 'invoiceAmount', 0, 1000000) &&
+      isOptNum(data, 'rewardCost', 0, 1000000) &&
       isOptStr(data, 'appointmentAt', 120) &&
       isOptStr(data, 'appointmentNote', 300) &&
       isOptStr(data, 'prizeId', 128) &&
@@ -312,6 +356,10 @@ service cloud.firestore {
             incoming().status == 'opened' &&
             (!('redeemedAt' in incoming()) || incoming().redeemedAt == null) &&
             (!('redeemedBy' in incoming()) || incoming().redeemedBy == null) &&
+            (!('cancelledAt' in incoming()) || incoming().cancelledAt == null) &&
+            (!('cancelledBy' in incoming()) || incoming().cancelledBy == null) &&
+            (!('invoiceAmount' in incoming()) || incoming().invoiceAmount == null) &&
+            (!('rewardCost' in incoming()) || incoming().rewardCost == null) &&
             (!('appointmentAt' in incoming()) || incoming().appointmentAt == null) &&
             (!('appointmentNote' in incoming()) || incoming().appointmentNote == null)
           )
@@ -328,10 +376,14 @@ service cloud.firestore {
             incoming().status == 'opened' &&
             (!('redeemedAt' in incoming()) || incoming().redeemedAt == null) &&
             (!('redeemedBy' in incoming()) || incoming().redeemedBy == null) &&
+            (!('cancelledAt' in incoming()) || incoming().cancelledAt == null) &&
+            (!('cancelledBy' in incoming()) || incoming().cancelledBy == null) &&
             incoming().diff(existing()).affectedKeys().hasOnly([
               'status',
               'openedAt',
               'expiresAt',
+              'selectedGameBox',
+              'gameMode',
               'prizeId',
               'prizeTitle',
               'prizeDescription',

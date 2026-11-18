@@ -1,23 +1,34 @@
 import { Component, type ErrorInfo, type ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
 import { onAuthStateChanged, signOut, type User } from 'firebase/auth';
-import { Lock, MessageCircle } from 'lucide-react';
-import type { LabProfile } from './types';
+import { Globe, Lock, MessageCircle } from 'lucide-react';
+import type { AppLang, LabProfile } from './types';
 import { ADMIN_BOOTSTRAP_EMAIL, auth } from './firebase';
+import { UI_COPY } from './i18n/translations';
 import { apiClient, DEFAULT_LAB_PROFILE } from './services/apiClient';
 import { formatWhatsAppPhone, resolvePublicBaseUrl } from './utils/whatsapp';
 import { PatientBoxView } from './components/PatientBoxView';
 import { AdminPanelView } from './components/AdminPanelView';
 import { AdminLoginModal } from './components/AdminLoginModal';
+import { PWAInstallButton } from './components/PWAInstallButton';
+import { OfflineIndicator } from './components/OfflineIndicator';
 
 const BASE_PATH = import.meta.env.BASE_URL || '/';
 const DEFAULT_ASSET_LOGO = `${BASE_PATH}logo.jpg`;
 const DEFAULT_ASSET_ICON = `${BASE_PATH}icon.svg`;
 
-function readInitialUrlState(): { token: string | null; encodedData: string | null; wantsAdmin: boolean } {
-  if (typeof window === 'undefined') return { token: null, encodedData: null, wantsAdmin: false };
+function readInitialUrlState(): {
+  token: string | null;
+  encodedData: string | null;
+  wantsAdmin: boolean;
+  referredBy: string | null;
+} {
+  if (typeof window === 'undefined') {
+    return { token: null, encodedData: null, wantsAdmin: false, referredBy: null };
+  }
   const params = new URLSearchParams(window.location.search);
   const token = params.get('box') || params.get('token') || params.get('t') || null;
   const encodedData = params.get('d') || null;
+  const referredBy = params.get('ref') || null;
   const hash = (window.location.hash || '').toLowerCase();
   const path = (window.location.pathname || '').toLowerCase();
   const wantsAdmin =
@@ -28,7 +39,7 @@ function readInitialUrlState(): { token: string | null; encodedData: string | nu
     hash === '#admin' ||
     hash === '#/admin' ||
     /\/admin\/?$/.test(path);
-  return { token, encodedData, wantsAdmin };
+  return { token, encodedData, wantsAdmin, referredBy };
 }
 
 class AppErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean }> {
@@ -45,16 +56,16 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, { hasError: bo
   render() {
     if (this.state.hasError) {
       return (
-        <div dir="rtl" className="flex min-h-screen items-center justify-center bg-slate-50 p-6 text-center">
-          <div className="max-w-md space-y-4 rounded-3xl border border-slate-200 bg-white p-8 shadow-sm">
-            <h1 className="text-lg font-extrabold text-slate-900">حدث خطأ غير متوقع</h1>
+        <div dir="rtl" className="flex min-h-screen items-center justify-center bg-[#FAF7F4] p-6 text-center">
+          <div className="max-w-md space-y-4 rounded-3xl border border-[#C9962D]/35 bg-white p-8 shadow-sm">
+            <h1 className="text-lg font-extrabold text-[#5C1422]">حدث خطأ غير متوقع</h1>
             <p className="text-xs leading-relaxed text-slate-600">
-              يرجى تحديث الصفحة للمتابعة. في حال استمرار المشكلة تأكد من اتصالك بالإنترنت وصلاحيات الحساب.
+              يرجى تحديث الصفحة للمتابعة. التطبيق يدعم العمل أوفلاين ويحتفظ بالبيانات محلياً.
             </p>
             <button
               type="button"
               onClick={() => window.location.reload()}
-              className="rounded-xl bg-teal-700 px-5 py-2.5 text-xs font-extrabold text-white hover:bg-teal-800 cursor-pointer"
+              className="rounded-xl bg-[#5C1422] px-5 py-2.5 text-xs font-extrabold text-white hover:bg-[#7A1C2E] cursor-pointer"
             >
               إعادة تحميل الصفحة
             </button>
@@ -73,6 +84,14 @@ function isAuthorizedAdminUser(user: User | null): boolean {
 
 function AppContent() {
   const initial = useMemo(() => readInitialUrlState(), []);
+  const [lang, setLang] = useState<AppLang>(() => {
+    try {
+      const saved = window.localStorage.getItem('rt_hb_lang');
+      return saved === 'en' ? 'en' : 'ar';
+    } catch {
+      return 'ar';
+    }
+  });
   const [labProfile, setLabProfile] = useState<LabProfile>(DEFAULT_LAB_PROFILE);
   const [serverShareBaseUrl, setServerShareBaseUrl] = useState<string>('');
   const [boxToken, setBoxToken] = useState<string | null>(initial.token);
@@ -82,6 +101,16 @@ function AppContent() {
   const [isAdminAuthed, setIsAdminAuthed] = useState(false);
   const [view, setView] = useState<'box' | 'admin'>('box');
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
+
+  useEffect(() => {
+    document.documentElement.dir = lang === 'en' ? 'ltr' : 'rtl';
+    document.documentElement.lang = lang;
+    try {
+      window.localStorage.setItem('rt_hb_lang', lang);
+    } catch {
+      // ignore
+    }
+  }, [lang]);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (user) => {
@@ -183,17 +212,18 @@ function AppContent() {
   const whatsappHref = `https://wa.me/${formatWhatsAppPhone(
     labProfile.whatsappNumber || labProfile.hotlineNumber
   )}`;
+  const copy = UI_COPY[lang];
 
   return (
-    <div dir="rtl" className="flex min-h-screen flex-col bg-slate-50 text-slate-900">
-      {/* Clean 3-Zone Top Bar */}
-      <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/95 backdrop-blur-md">
-        <div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-4 px-4 sm:gap-8 sm:px-6">
+    <div dir={lang === 'en' ? 'ltr' : 'rtl'} className="flex min-h-screen flex-col bg-[#FAF7F4] text-slate-900">
+      {/* Clean 3-Zone Top Bar — RT Burgundy & Gold */}
+      <header className="sticky top-0 z-30 border-b border-[#C9962D]/30 bg-white/95 backdrop-blur-md">
+        <div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-3 px-4 sm:gap-6 sm:px-6">
           {/* Zone 1: Brand Wordmark + Logo */}
           <button
             type="button"
             onClick={() => handlePreviewBox(undefined)}
-            className="flex items-center gap-2.5 text-base font-extrabold tracking-tight text-slate-900 whitespace-nowrap shrink-0 cursor-pointer sm:text-lg"
+            className="flex items-center gap-2.5 text-sm font-extrabold tracking-tight text-[#5C1422] whitespace-nowrap shrink-0 cursor-pointer sm:text-base"
           >
             <img
               src={
@@ -206,36 +236,52 @@ function AppContent() {
               onError={(e) => {
                 (e.currentTarget as HTMLImageElement).src = DEFAULT_ASSET_ICON;
               }}
-              className="h-9 w-9 shrink-0 rounded-xl border border-slate-200 bg-white object-contain p-0.5"
+              className="h-9 w-9 shrink-0 rounded-xl border border-[#C9962D]/50 bg-white object-contain p-0.5"
             />
-            <span className="truncate max-w-[200px] sm:max-w-none">{labProfile.labName}</span>
+            <span className="truncate max-w-[155px] sm:max-w-none">{labProfile.labName}</span>
           </button>
 
-          {/* Zone 2: Minimalist Clean Tagline (Desktop only) */}
-          <p className="hidden text-xs font-semibold text-slate-500 md:block whitespace-nowrap">
-            Happiness Box · صندوق السعادة
+          {/* Zone 2: Bilingual Brand Subtitle (Desktop) */}
+          <p className="hidden text-xs font-bold text-[#7A1C2E]/80 lg:block whitespace-nowrap">
+            {copy.brandSubtitle}
           </p>
 
-          {/* Zone 3: Primary WhatsApp Action */}
+          {/* Zone 3: Language Switcher + PWA Install + WhatsApp */}
           <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => setLang((prev) => (prev === 'ar' ? 'en' : 'ar'))}
+              aria-label="Toggle language"
+              className="inline-flex min-h-[40px] items-center gap-1 rounded-xl border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-extrabold text-[#5C1422] hover:bg-[#FAF7F4] cursor-pointer whitespace-nowrap"
+            >
+              <Globe className="h-3.5 w-3.5 text-[#B8860B]" />
+              <span>{lang === 'ar' ? 'EN' : 'عربي'}</span>
+            </button>
+
+            <PWAInstallButton lang={lang} variant="header" />
+
             <a
               href={whatsappHref}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex min-h-[42px] items-center gap-1.5 rounded-xl bg-teal-700 px-4 py-2 text-xs font-extrabold text-white transition-colors hover:bg-teal-800 whitespace-nowrap shrink-0"
+              className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl bg-[#5C1422] px-3.5 py-2 text-xs font-extrabold text-white transition-colors hover:bg-[#7A1C2E] whitespace-nowrap shrink-0"
             >
-              <MessageCircle className="h-4 w-4" />
-              <span>واتساب المعمل</span>
+              <MessageCircle className="h-4 w-4 text-[#E7C15A]" />
+              <span className="hidden sm:inline">{copy.whatsappLab}</span>
             </a>
           </div>
         </div>
       </header>
+
+      {/* Real-time Offline / Sync Queue Status Bar */}
+      <OfflineIndicator lang={lang} />
 
       {/* Main Content */}
       <main className="flex-1">
         {view === 'admin' && isAdminAuthed ? (
           <AdminPanelView
             shareBaseUrl={publicShareBaseUrl}
+            lang={lang}
             onLogout={handleLogout}
             onProfileUpdated={setLabProfile}
             onPreviewBox={(t) => {
@@ -247,7 +293,10 @@ function AppContent() {
           <PatientBoxView
             token={boxToken}
             encodedData={encodedBoxData}
+            referredBy={initial.referredBy}
+            lang={lang}
             labProfile={labProfile}
+            shareBaseUrl={publicShareBaseUrl}
             onBoxAssigned={(t) => {
               setBoxToken(t);
               setEncodedBoxData(null);
@@ -258,10 +307,10 @@ function AppContent() {
       </main>
 
       {/* Quiet Footer with Discreet Admin Lock Trigger */}
-      <footer className="border-t border-slate-200 bg-white py-4 text-xs text-slate-500">
+      <footer className="border-t border-[#C9962D]/25 bg-white py-4 text-xs text-slate-500">
         <div className="mx-auto flex max-w-7xl flex-col items-center justify-between gap-2 px-4 sm:flex-row sm:px-6">
           <div className="flex flex-wrap items-center justify-center gap-2 text-center">
-            <span className="font-bold text-slate-700">{labProfile.labName}</span>
+            <span className="font-extrabold text-[#5C1422]">{labProfile.labName}</span>
             <span aria-hidden="true">·</span>
             <span>{labProfile.address}</span>
           </div>
@@ -272,11 +321,11 @@ function AppContent() {
             <button
               type="button"
               onClick={handleAdminClick}
-              aria-label="دخول الإدارة"
-              className="inline-flex items-center gap-1 text-slate-400 transition-colors hover:text-slate-700 cursor-pointer whitespace-nowrap"
+              aria-label={copy.adminAccess}
+              className="inline-flex items-center gap-1 text-slate-400 transition-colors hover:text-[#5C1422] cursor-pointer whitespace-nowrap"
             >
               <Lock className="h-3 w-3" />
-              <span>الإدارة</span>
+              <span>{copy.adminAccess}</span>
             </button>
           </div>
         </div>

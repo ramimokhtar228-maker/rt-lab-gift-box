@@ -3,13 +3,19 @@
 @theme {
   --font-sans: "Cairo", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --color-rt-burgundy: #5C1422;
+  --color-rt-burgundy-dark: #3B0B15;
+  --color-rt-burgundy-hover: #7A1C2E;
+  --color-rt-gold: #B8860B;
+  --color-rt-gold-light: #C9962D;
+  --color-rt-cream: #FAF7F4;
 }
 
 @layer base {
   body {
     font-family: "Cairo", ui-sans-serif, system-ui, sans-serif;
-    background-color: #f8fafc;
-    color: #0f172a;
+    background-color: #FAF7F4;
+    color: #1A1416;
   }
 }
 

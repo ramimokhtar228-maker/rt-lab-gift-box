@@ -117,6 +117,7 @@ export function buildBoxUrl(
     branchName?: string;
     visitRef?: string;
     expiresAt?: string;
+    gameMode?: string;
     labProfile?: LabProfile;
     prizes?: Array<{ title: string; discountLabel: string; validHours: number; weight: number; active: boolean }>;
   }
@@ -136,6 +137,7 @@ export function buildBoxUrl(
         b: meta.branchName || '',
         v: meta.visitRef || '',
         e: meta.expiresAt || '',
+        ...(meta.gameMode ? { gm: meta.gameMode } : {}),
         ...(meta.labProfile
           ? {
               ln: meta.labProfile.labName,
@@ -218,6 +220,21 @@ export function buildPatientClaimWhatsAppUrl(box: BoxPublicResponse, lab: LabPro
   return `https://wa.me/${phone}?text=${encodeURIComponent(text)}`;
 }
 
+export function buildFriendReferralWhatsAppUrl(
+  referralCode: string,
+  clientName: string,
+  lab: LabProfile,
+  baseUrl: string
+): string {
+  const cleanBase = (baseUrl || lab.shareBaseUrl || 'https://ramimokhtar228-maker.github.io/rt-lab-gift-box').replace(
+    /\/$/,
+    ''
+  );
+  const inviteUrl = `${cleanBase}/?ref=${encodeURIComponent(referralCode)}`;
+  const msg = `أهلاً بك 🌟\nيرشح لك ${clientName} تجربة صندوق الفرحة من ${lab.labName} لتحصل على هدية أو خصم مضمون!\nاستخدم كود الدعوة: ${referralCode}\nافتح صندوقك من هنا:\n${inviteUrl}`;
+  return `https://wa.me/?text=${encodeURIComponent(msg)}`;
+}
+
 export function buildAdminInviteText(
   link: GiftLink,
   lab: LabProfile,
@@ -230,6 +247,7 @@ export function buildAdminInviteText(
     branchName: link.branchName,
     visitRef: link.visitRef,
     expiresAt: link.expiresAt,
+    gameMode: link.gameMode,
     labProfile: lab,
     prizes,
   });
@@ -302,13 +320,15 @@ export function exportLinksExcelCsv(links: GiftLink[]): void {
   const statusLabel = (s: GiftLink['status']) => {
     switch (s) {
       case 'pending':
-        return 'بانتظار الفتح';
+        return 'جديد - بانتظار الفتح';
       case 'opened':
-        return 'كسب - بانتظار الصرف';
+        return 'مكتشف - بانتظار الصرف';
       case 'redeemed':
-        return 'تم الصرف';
+        return 'مستخدم - تم الصرف';
       case 'expired':
         return 'منتهي الصلاحية';
+      case 'cancelled':
+        return 'ملغي';
     }
   };
 
@@ -317,10 +337,15 @@ export function exportLinksExcelCsv(links: GiftLink[]): void {
     'رقم الواتساب',
     'الفرع',
     'رقم الزيارة',
+    'الحملة',
+    'نوع اللعبة',
+    'مستوى الولاء',
     'الحالة',
     'الجائزة',
     'قيمة الخصم / الهدية',
     'كود الجائزة',
+    'قيمة الفاتورة (ج.م)',
+    'تكلفة المكافأة (ج.م)',
     'موعد الحضور / السحب',
     'ملاحظات الموعد',
     'تاريخ الفتح',
@@ -334,10 +359,15 @@ export function exportLinksExcelCsv(links: GiftLink[]): void {
       l.clientPhone,
       l.branchName,
       l.visitRef,
+      l.campaignName || '—',
+      l.gameMode || 'box',
+      l.loyaltyTier || 'Basic',
       statusLabel(l.status),
       l.prizeTitle || '—',
       l.prizeDiscountLabel || '—',
       l.prizeCode || l.token,
+      l.invoiceAmount ?? '',
+      l.rewardCost ?? '',
       l.appointmentAt || '—',
       l.appointmentNote || '—',
       formatArabicDate(l.openedAt),

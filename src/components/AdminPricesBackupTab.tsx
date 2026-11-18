@@ -203,7 +203,7 @@ export function AdminPricesBackupTab({
       <section className="rounded-2xl border border-slate-200 bg-white p-5 sm:p-6">
         <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
           <div>
-            <h2 className="text-base font-extrabold text-slate-900">
+            <h2 className="text-base font-extrabold text-[#5C1422]">
               النسخ الاحتياطي وتصدير/استيراد البيانات الكاملة
             </h2>
             <p className="text-xs text-slate-500">
@@ -215,9 +215,9 @@ export function AdminPricesBackupTab({
               type="button"
               disabled={exporting}
               onClick={handleExportFullBackup}
-              className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-teal-700 px-4 py-2 text-xs font-extrabold text-white hover:bg-teal-800 cursor-pointer whitespace-nowrap"
+              className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-[#5C1422] px-4 py-2 text-xs font-extrabold text-white hover:bg-[#7A1C2E] cursor-pointer whitespace-nowrap"
             >
-              <Download className="h-4 w-4" />
+              <Download className="h-4 w-4 text-[#E7C15A]" />
               <span>{exporting ? 'جاري التصدير...' : 'حفظ نسخة احتياطية كاملة (JSON)'}</span>
             </button>
 
@@ -251,7 +251,7 @@ export function AdminPricesBackupTab({
       </section>
 
       {/* Price List Editor */}
-      <section className="rounded-2xl border border-slate-200 bg-white p-5 sm:p-6 space-y-4">
+      <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5 sm:p-6">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h3 className="text-base font-extrabold text-slate-900">
@@ -275,7 +275,7 @@ export function AdminPricesBackupTab({
               onClick={handleSaveAllPrices}
               disabled={savingAll}
               className={`inline-flex min-h-[40px] items-center gap-1.5 rounded-xl px-4 py-2 text-xs font-extrabold text-white cursor-pointer whitespace-nowrap ${
-                dirty ? 'bg-amber-600 hover:bg-amber-700' : 'bg-slate-900 hover:bg-slate-800'
+                dirty ? 'bg-[#C9962D] text-[#3A0A14] hover:bg-[#B8860B]' : 'bg-[#5C1422] hover:bg-[#7A1C2E]'
               }`}
             >
               <Save className="h-3.5 w-3.5" />
@@ -287,7 +287,7 @@ export function AdminPricesBackupTab({
         {showAddForm ? (
           <form
             onSubmit={handleAddPrice}
-            className="grid grid-cols-1 gap-3 rounded-xl border border-teal-200 bg-teal-50/40 p-4 sm:grid-cols-5"
+            className="grid grid-cols-1 gap-3 rounded-xl border border-[#C9962D]/40 bg-[#FFF8EB]/50 p-4 sm:grid-cols-5"
           >
             <input
               type="text"
@@ -295,7 +295,7 @@ export function AdminPricesBackupTab({
               value={newNameAr}
               onChange={(e) => setNewNameAr(e.target.value)}
               placeholder="اسم التحليل *"
-              className="sm:col-span-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs focus:border-teal-700 focus:outline-none"
+              className="sm:col-span-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs focus:border-[#5C1422] focus:outline-none"
             />
             <input
               type="text"
@@ -303,7 +303,7 @@ export function AdminPricesBackupTab({
               value={newCode}
               onChange={(e) => setNewCode(e.target.value)}
               placeholder="الكود (اختياري)"
-              className="rounded-lg border border-slate-300 bg-white px-3 py-2 font-mono text-xs focus:border-teal-700 focus:outline-none"
+              className="rounded-lg border border-slate-300 bg-white px-3 py-2 font-mono text-xs focus:border-[#5C1422] focus:outline-none"
             />
             <input
               type="number"
@@ -312,7 +312,7 @@ export function AdminPricesBackupTab({
               value={newPrice}
               onChange={(e) => setNewPrice(e.target.value)}
               placeholder="السعر (ج.م) *"
-              className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-center font-mono text-xs focus:border-teal-700 focus:outline-none"
+              className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-center font-mono text-xs focus:border-[#5C1422] focus:outline-none"
             />
             <div className="flex gap-2">
               <input
@@ -321,11 +321,11 @@ export function AdminPricesBackupTab({
                 value={newOfferPrice}
                 onChange={(e) => setNewOfferPrice(e.target.value)}
                 placeholder="سعر العرض"
-                className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-center font-mono text-xs focus:border-teal-700 focus:outline-none"
+                className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-center font-mono text-xs focus:border-[#5C1422] focus:outline-none"
               />
               <button
                 type="submit"
-                className="shrink-0 rounded-lg bg-teal-700 px-3 py-2 text-xs font-bold text-white hover:bg-teal-800 cursor-pointer"
+                className="shrink-0 rounded-lg bg-[#5C1422] px-3 py-2 text-xs font-bold text-white hover:bg-[#7A1C2E] cursor-pointer"
               >
                 إضافة
               </button>
@@ -340,7 +340,7 @@ export function AdminPricesBackupTab({
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="ابحث باسم التحليل بالعربي أو الإنجليزي أو الكود..."
-            className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pr-10 pl-4 text-xs text-slate-900 focus:border-teal-700 focus:bg-white focus:outline-none"
+            className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pr-10 pl-4 text-xs text-slate-900 focus:border-[#5C1422] focus:bg-white focus:outline-none"
           />
         </div>
 
@@ -357,7 +357,7 @@ export function AdminPricesBackupTab({
             </thead>
             <tbody className="divide-y divide-slate-100">
               {filteredPrices.map((item) => (
-                <tr key={item.id} className="hover:bg-slate-50/80">
+                <tr key={item.id} className="hover:bg-[#FAF7F4]">
                   <td dir="ltr" className="py-2.5 pl-3 font-mono text-slate-500 tabular-nums whitespace-nowrap">
                     {item.code}
                   </td>
@@ -373,7 +373,7 @@ export function AdminPricesBackupTab({
                       min={0}
                       value={item.price}
                       onChange={(e) => handleInlineChange(item.id, 'price', e.target.value)}
-                      className="w-24 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-center font-mono font-bold text-slate-900 tabular-nums focus:border-teal-700 focus:outline-none"
+                      className="w-24 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-center font-mono font-bold text-slate-900 tabular-nums focus:border-[#5C1422] focus:outline-none"
                     />
                   </td>
                   <td className="py-2.5 px-3">
@@ -383,7 +383,7 @@ export function AdminPricesBackupTab({
                       value={item.offerPrice ?? ''}
                       placeholder="—"
                       onChange={(e) => handleInlineChange(item.id, 'offerPrice', e.target.value)}
-                      className="w-24 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-center font-mono font-bold text-teal-800 tabular-nums focus:border-teal-700 focus:outline-none"
+                      className="w-24 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-center font-mono font-bold text-[#5C1422] tabular-nums focus:border-[#5C1422] focus:outline-none"
                     />
                   </td>
                   <td className="py-2.5 pr-3">

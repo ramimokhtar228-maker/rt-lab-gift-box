@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowRight,
+  BarChart3,
   Check,
   Copy,
   DatabaseBackup,
@@ -11,18 +12,20 @@ import {
   RefreshCw,
   Settings,
 } from 'lucide-react';
-import type { AdminDashboardData, LabProfile } from '../types';
+import type { AdminDashboardData, AppLang, LabProfile } from '../types';
 import { apiClient } from '../services/apiClient';
 import { copyToClipboard, formatWhatsAppPhone } from '../utils/whatsapp';
 import { AdminLinksTab } from './AdminLinksTab';
 import { AdminPrizesTab } from './AdminPrizesTab';
+import { AdminAnalyticsTab } from './AdminAnalyticsTab';
 import { AdminPricesBackupTab } from './AdminPricesBackupTab';
 import { AdminSettingsTab } from './AdminSettingsTab';
 
-type AdminTab = 'links' | 'prizes' | 'settings' | 'prices';
+type AdminTab = 'links' | 'prizes' | 'analytics' | 'settings' | 'prices';
 
 interface AdminPanelViewProps {
   shareBaseUrl: string;
+  lang: AppLang;
   onLogout: () => void;
   onProfileUpdated: (profile: LabProfile) => void;
   onPreviewBox: (token?: string) => void;
@@ -30,13 +33,14 @@ interface AdminPanelViewProps {
 
 export function AdminPanelView({
   shareBaseUrl,
+  lang,
   onLogout,
   onProfileUpdated,
   onPreviewBox,
 }: AdminPanelViewProps) {
   const [tab, setTab] = useState<AdminTab>('links');
-  const [data, setData] = useState<AdminDashboardData | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [data, setData] = useState<AdminDashboardData | null>(() => apiClient.getCachedDashboard());
+  const [loading, setLoading] = useState<boolean>(() => !apiClient.getCachedDashboard());
   const [syncing, setSyncing] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<'admin' | 'patient' | null>(null);
@@ -84,7 +88,7 @@ export function AdminPanelView({
       } catch (err) {
         console.error('Force sync error:', err);
         if (!silent) {
-          showToast('تعذر تنشيط المزامنة من السحابة حالياً. تحقق من الاتصال أو صلاحية الحساب.', true);
+          showToast('تعمل الآن على البيانات المخزنة محلياً — ستتم المزامنة السحابية فور استقرار الاتصال.', true);
         }
       } finally {
         setSyncing(false);
@@ -101,9 +105,8 @@ export function AdminPanelView({
       try {
         await apiClient.ensureInitialSeed();
       } catch (err) {
-        if (!cancelled) {
+        if (!cancelled && (typeof navigator === 'undefined' || navigator.onLine)) {
           console.error('Seed check error:', err);
-          showToast('تعذر تهيئة قاعدة البيانات السحابية. تأكد من تسجيل الدخول بالحساب المصرح.', true);
         }
       }
 
@@ -124,13 +127,16 @@ export function AdminPanelView({
         },
         (err) => {
           console.error('Dashboard subscription error:', err);
-          showToast('تعذر قراءة بيانات المرضى من السحابة — تأكد من صلاحية الحساب.', true);
+          if (typeof navigator === 'undefined' || navigator.onLine) {
+            showToast('تعذر قراءة بيانات المرضى من السحابة — تأكد من صلاحية الحساب.', true);
+          }
           setLoading(false);
         }
       );
 
-      // Run one authoritative server sync + localStorage booking recovery in background
-      void runForceSync(true);
+      if (typeof navigator === 'undefined' || navigator.onLine) {
+        void runForceSync(true);
+      }
     })();
 
     return () => {
@@ -147,7 +153,7 @@ export function AdminPanelView({
     return (
       <div className="mx-auto flex min-h-[420px] max-w-7xl items-center justify-center px-4">
         <div className="flex flex-col items-center gap-3 text-slate-500">
-          <div className="h-9 w-9 animate-spin rounded-full border-3 border-slate-200 border-t-teal-700" />
+          <div className="h-9 w-9 animate-spin rounded-full border-3 border-slate-200 border-t-[#5C1422]" />
           <span className="text-sm font-semibold">جاري مزامنة بيانات المرضى ولوحة الإدارة...</span>
         </div>
       </div>
@@ -172,22 +178,23 @@ export function AdminPanelView({
 
   const tabs: { id: AdminTab; label: string; icon: typeof Link2 }[] = [
     { id: 'links', label: 'المرضى والروابط والمواعيد', icon: Link2 },
-    { id: 'prizes', label: 'جوائز البوكس', icon: Gift },
-    { id: 'settings', label: 'بيانات المعمل واللوجو', icon: Settings },
+    { id: 'prizes', label: 'بنك الجوائز والعروض', icon: Gift },
+    { id: 'analytics', label: 'التحليلات والتوزيع والعائد', icon: BarChart3 },
+    { id: 'settings', label: 'الإعدادات والألعاب والتطبيق', icon: Settings },
     { id: 'prices', label: 'النسخ الاحتياطي والأسعار', icon: DatabaseBackup },
   ];
 
   return (
     <div className="mx-auto w-full max-w-7xl space-y-6 px-4 py-6 sm:px-6 sm:py-8">
       {/* Admin Subheader */}
-      <div className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5">
+      <div className="space-y-4 rounded-2xl border border-[#C9962D]/35 bg-white p-5">
         <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
           <div>
-            <h1 className="text-lg font-extrabold text-slate-900">
-              إدارة برنامج Happiness Box · {data.labProfile.labName}
+            <h1 className="text-lg font-extrabold text-[#5C1422]">
+              إدارة منظومة Happiness Box · {data.labProfile.labName}
             </h1>
             <p className="text-xs text-slate-500">
-              مزامنة سحابية مباشرة: كل مريض يفتح الصندوق يظهر هنا فوراً لتأكيد فوزه وتحديد الموعد أو التصدير إلى Excel.
+              مزامنة سحابية وأوفلاين: كافة الجوائز والروابط ومؤشرات الـ ROI والتطبيق التفاعلي في مكان واحد.
               {lastSyncedAt ? ` (آخر تحديث: ${lastSyncedAt})` : ''}
             </p>
           </div>
@@ -196,15 +203,15 @@ export function AdminPanelView({
               type="button"
               disabled={syncing}
               onClick={() => void runForceSync(false)}
-              className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl bg-teal-700 px-3.5 py-2 text-xs font-extrabold text-white shadow-xs transition-colors hover:bg-teal-800 disabled:opacity-60 cursor-pointer whitespace-nowrap"
+              className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl bg-[#5C1422] px-3.5 py-2 text-xs font-extrabold text-white shadow-xs transition-colors hover:bg-[#7A1C2E] disabled:opacity-60 cursor-pointer whitespace-nowrap"
             >
-              <RefreshCw className={`h-3.5 w-3.5 ${syncing ? 'animate-spin' : ''}`} />
+              <RefreshCw className={`h-3.5 w-3.5 text-[#E7C15A] ${syncing ? 'animate-spin' : ''}`} />
               <span>{syncing ? 'جاري التنشيط والمزامنة...' : 'تنشيط المزامنة وجلب الحجوزات'}</span>
             </button>
             <button
               type="button"
               onClick={() => onPreviewBox()}
-              className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2 text-xs font-bold text-slate-700 hover:bg-slate-100 cursor-pointer whitespace-nowrap"
+              className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border border-slate-200 bg-[#FAF7F4] px-3.5 py-2 text-xs font-bold text-[#5C1422] hover:bg-slate-100 cursor-pointer whitespace-nowrap"
             >
               <ArrowRight className="h-3.5 w-3.5" />
               <span>عرض صفحة المريض</span>
@@ -222,7 +229,7 @@ export function AdminPanelView({
 
         {/* Active Sync Links Strip */}
         <div className="grid grid-cols-1 gap-2.5 border-t border-slate-100 pt-3.5 md:grid-cols-2">
-          <div className="flex items-center justify-between gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+          <div className="flex items-center justify-between gap-2 rounded-xl border border-slate-200 bg-[#FAF7F4] px-3 py-2">
             <div className="min-w-0">
               <span className="block text-[11px] font-bold text-slate-500">
                 رابط المزامنة العام للمرضى (واتساب الاستقبال: +{formatWhatsAppPhone(data.labProfile.whatsappNumber || data.labProfile.hotlineNumber)})
@@ -237,7 +244,7 @@ export function AdminPanelView({
                 target="_blank"
                 rel="noopener noreferrer"
                 title="فتح وتنشيط الرابط العام"
-                className="inline-flex min-h-[34px] items-center gap-1 rounded-lg border border-teal-200 bg-teal-50 px-2.5 py-1 text-xs font-bold text-teal-900 hover:bg-teal-100"
+                className="inline-flex min-h-[34px] items-center gap-1 rounded-lg border border-[#C9962D]/50 bg-[#FFF8EB] px-2.5 py-1 text-xs font-bold text-[#5C1422] hover:bg-[#FDEFD1]"
               >
                 <ExternalLink className="h-3.5 w-3.5" />
                 <span>فتح</span>
@@ -260,12 +267,12 @@ export function AdminPanelView({
             </div>
           </div>
 
-          <div className="flex items-center justify-between gap-2 rounded-xl border border-teal-200 bg-teal-50/50 px-3 py-2">
+          <div className="flex items-center justify-between gap-2 rounded-xl border border-[#5C1422]/20 bg-[#5C1422]/5 px-3 py-2">
             <div className="min-w-0">
-              <span className="block text-[11px] font-bold text-teal-800">
+              <span className="block text-[11px] font-bold text-[#5C1422]">
                 رابط المزامنة المباشر للوحة الإدارة (المصرح)
               </span>
-              <span dir="ltr" className="block truncate font-mono text-xs font-semibold text-teal-950">
+              <span dir="ltr" className="block truncate font-mono text-xs font-semibold text-[#3B0A13]">
                 {directAdminSyncUrl}
               </span>
             </div>
@@ -279,7 +286,7 @@ export function AdminPanelView({
                   showToast('تم نسخ رابط لوحة الإدارة المباشر.');
                 }
               }}
-              className="inline-flex min-h-[34px] shrink-0 items-center gap-1 rounded-lg border border-teal-200 bg-white px-2.5 py-1 text-xs font-bold text-teal-900 hover:bg-teal-100 cursor-pointer"
+              className="inline-flex min-h-[34px] shrink-0 items-center gap-1 rounded-lg border border-[#5C1422]/20 bg-white px-2.5 py-1 text-xs font-bold text-[#5C1422] hover:bg-[#FAF7F4] cursor-pointer"
             >
               {copiedKey === 'admin' ? <Check className="h-3.5 w-3.5 text-emerald-600" /> : <Copy className="h-3.5 w-3.5" />}
               <span>{copiedKey === 'admin' ? 'نُسخ' : 'نسخ'}</span>
@@ -292,9 +299,9 @@ export function AdminPanelView({
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         {[
           { label: 'إجمالي السجلات والروابط', value: data.stats.totalLinks, accent: 'text-slate-900' },
-          { label: 'كسب (بانتظار الصرف)', value: data.stats.openedLinks, accent: 'text-amber-700' },
-          { label: 'تم صرفها بالمعمل', value: data.stats.redeemedLinks, accent: 'text-emerald-700' },
-          { label: 'جوائز نشطة بالبوكس', value: data.stats.activePrizes, accent: 'text-teal-800' },
+          { label: 'مكتشف (بانتظار الصرف)', value: data.stats.openedLinks, accent: 'text-[#B8860B]' },
+          { label: 'مستخدم (تم الصرف)', value: data.stats.redeemedLinks, accent: 'text-emerald-700' },
+          { label: 'صافي هامش المساهمة', value: `${data.stats.contributionMarginEgp.toLocaleString('en-US')} ج.م`, accent: 'text-[#5C1422]' },
         ].map((kpi) => (
           <div
             key={kpi.label}
@@ -320,11 +327,11 @@ export function AdminPanelView({
               onClick={() => setTab(item.id)}
               className={`inline-flex min-h-[42px] flex-1 items-center justify-center gap-2 rounded-xl px-4 py-2 text-xs font-extrabold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                 active
-                  ? 'bg-teal-700 text-white shadow-xs'
-                  : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
+                  ? 'bg-[#5C1422] text-white shadow-xs'
+                  : 'text-slate-600 hover:bg-[#FAF7F4] hover:text-[#5C1422]'
               }`}
             >
-              <Icon className="h-4 w-4" />
+              <Icon className={`h-4 w-4 ${active ? 'text-[#E7C15A]' : ''}`} />
               <span>{item.label}</span>
             </button>
           );
@@ -366,6 +373,8 @@ export function AdminPanelView({
         />
       ) : null}
 
+      {tab === 'analytics' ? <AdminAnalyticsTab dashboardData={data} /> : null}
+
       {tab === 'prices' ? (
         <AdminPricesBackupTab
           dashboardData={data}
@@ -377,6 +386,7 @@ export function AdminPanelView({
       {tab === 'settings' ? (
         <AdminSettingsTab
           labProfile={data.labProfile}
+          lang={lang}
           onProfileSaved={(updated) => {
             setData((prev) => (prev ? { ...prev, labProfile: updated } : prev));
             onProfileUpdated(updated);

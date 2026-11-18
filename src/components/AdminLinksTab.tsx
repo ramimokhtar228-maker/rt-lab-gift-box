@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import {
+  Ban,
   CalendarClock,
   Check,
   CheckCircle2,
@@ -17,7 +18,8 @@ import {
   ShieldCheck,
   Trash2,
 } from 'lucide-react';
-import type { GiftLink, LabProfile, Prize } from '../types';
+import type { GameMode, GiftLink, LabProfile, LoyaltyTier, Prize } from '../types';
+import { GAME_MODE_META } from '../i18n/translations';
 import { apiClient } from '../services/apiClient';
 import { normalizeArabicDigits } from '../utils/phoneHash';
 import {
@@ -31,6 +33,8 @@ import {
   formatWhatsAppPhone,
   getTimeRemaining,
 } from '../utils/whatsapp';
+
+const ALL_GAME_MODES: GameMode[] = ['box', 'three_boxes', 'wheel', 'scratch', 'secret', 'seasonal'];
 
 interface AdminLinksTabProps {
   links: GiftLink[];
@@ -56,15 +60,21 @@ export function AdminLinksTab({
   const [branchName, setBranchName] = useState(labProfile.branches[0] || '');
   const [visitRef, setVisitRef] = useState('');
   const [linkValidDays, setLinkValidDays] = useState(14);
+  const [gameMode, setGameMode] = useState<GameMode>(labProfile.defaultGameMode || 'box');
+  const [campaignName, setCampaignName] = useState(labProfile.activeCampaign || '');
+  const [loyaltyTier, setLoyaltyTier] = useState<LoyaltyTier>('Basic');
+  const [isBirthdayGift, setIsBirthdayGift] = useState(false);
   const [creating, setCreating] = useState(false);
   const [lastCreated, setLastCreated] = useState<GiftLink | null>(null);
 
   const [redeemCode, setRedeemCode] = useState('');
+  const [redeemInvoice, setRedeemInvoice] = useState('');
+  const [redeemCost, setRedeemCost] = useState('');
   const [redeeming, setRedeeming] = useState(false);
 
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<
-    'all' | 'opened' | 'pending' | 'redeemed' | 'expired'
+    'all' | 'opened' | 'pending' | 'redeemed' | 'expired' | 'cancelled'
   >('all');
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
@@ -101,6 +111,7 @@ export function AdminLinksTab({
       branchName: lnk.branchName,
       visitRef: lnk.visitRef,
       expiresAt: lnk.expiresAt,
+      gameMode: lnk.gameMode,
       labProfile,
       prizes,
     });
@@ -126,6 +137,10 @@ export function AdminLinksTab({
         branchName: branchName || labProfile.branches[0],
         visitRef,
         linkValidDays,
+        gameMode,
+        campaignName: campaignName.trim() || undefined,
+        loyaltyTier,
+        isBirthdayGift,
       });
       if (!data.ok || !data.link) {
         onNotify(data.message || 'تعذر إنشاء الرابط.', true);
@@ -134,8 +149,9 @@ export function AdminLinksTab({
         setClientName('');
         setClientPhone('');
         setVisitRef('');
+        setIsBirthdayGift(false);
         await onRefresh();
-        onNotify('تم إنشاء رابط صندوق السعادة وحفظه سحابياً بنجاح.');
+        onNotify('تم إنشاء رابط صندوق الفرحة وحسم الجائزة مسبقاً وحفظه سحابياً بنجاح.');
       }
     } catch {
       onNotify('تعذر حفظ الرابط في قاعدة البيانات.', true);
@@ -149,11 +165,18 @@ export function AdminLinksTab({
     if (!clean || redeeming) return;
     setRedeeming(true);
     try {
-      const data = await apiClient.redeemPrize(clean, 'استقبال المعمل');
+      const invoiceAmount = redeemInvoice.trim() ? Number(redeemInvoice) : undefined;
+      const rewardCost = redeemCost.trim() ? Number(redeemCost) : undefined;
+      const data = await apiClient.redeemPrize(clean, 'استقبال المعمل', {
+        invoiceAmount: Number.isFinite(invoiceAmount) ? invoiceAmount : undefined,
+        rewardCost: Number.isFinite(rewardCost) ? rewardCost : undefined,
+      });
       if (!data.ok) {
         onNotify(data.message || 'تعذر صرف الجائزة.', true);
       } else {
         setRedeemCode('');
+        setRedeemInvoice('');
+        setRedeemCost('');
         await onRefresh();
         onNotify(data.message || 'تم تأكيد الصرف بنجاح.');
       }
@@ -161,6 +184,20 @@ export function AdminLinksTab({
       onNotify('تعذر الاتصال بقاعدة البيانات.', true);
     } finally {
       setRedeeming(false);
+    }
+  };
+
+  const handleCancelLink = async (id: string) => {
+    try {
+      const res = await apiClient.cancelGiftLink(id, 'إدارة المعمل');
+      if (res.ok) {
+        await onRefresh();
+        onNotify(res.message);
+      } else {
+        onNotify(res.message, true);
+      }
+    } catch {
+      onNotify('تعذر إلغاء الكود.', true);
     }
   };
 
@@ -209,13 +246,11 @@ export function AdminLinksTab({
     const raw = recoveryText.trim();
     if (!raw) return [];
 
-    // Split multiple pasted WhatsApp messages reliably without breaking inside a single message's terms block
     const blocks = raw
       .split(/(?=مرحباً\s)|(?=الاسم\s*[:：])|\n{2,}(?=[^\n]*(?:الاسم\s*[:：]|الجائزة\s*[:：]|RTWIN-))/g)
       .reduce<string[]>((acc, chunk) => {
         const trimmed = chunk.trim();
         if (!trimmed) return acc;
-        // Merge standalone "الاسم:" chunk with preceding "مرحباً" header if they got separated right after مرحباً
         if (
           acc.length > 0 &&
           /^مرحباً/i.test(acc[acc.length - 1]) &&
@@ -260,7 +295,7 @@ export function AdminLinksTab({
         discountLabel = parenMatch[2].trim();
       }
       if (!prizeTitle) {
-        prizeTitle = prizes[0]?.title || 'جائزة صندوق السعادة';
+        prizeTitle = prizes[0]?.title || 'جائزة صندوق الفرحة';
       }
 
       results.push({
@@ -359,7 +394,8 @@ export function AdminLinksTab({
         l.clientPhone.toLowerCase().includes(q) ||
         l.token.toLowerCase().includes(q) ||
         (l.prizeCode || '').toLowerCase().includes(q) ||
-        (l.prizeTitle || '').toLowerCase().includes(q)
+        (l.prizeTitle || '').toLowerCase().includes(q) ||
+        (l.campaignName || '').toLowerCase().includes(q)
       );
     });
   }, [links, locallyDeletedIds, search, statusFilter]);
@@ -367,26 +403,30 @@ export function AdminLinksTab({
   const statusText = (s: GiftLink['status']) => {
     switch (s) {
       case 'pending':
-        return 'بانتظار الفتح';
+        return 'جديد · بانتظار الفتح';
       case 'opened':
-        return 'كسب — بانتظار الصرف';
+        return 'مكتشف · بانتظار الصرف';
       case 'redeemed':
-        return 'تم الصرف';
+        return 'مستخدم · تم الصرف';
       case 'expired':
         return 'منتهي الصلاحية';
+      case 'cancelled':
+        return 'ملغي';
     }
   };
 
   const statusColor = (s: GiftLink['status']) => {
     switch (s) {
       case 'pending':
-        return 'text-slate-600';
+        return 'text-slate-600 font-semibold';
       case 'opened':
-        return 'text-amber-700 font-bold';
+        return 'text-[#B8860B] font-bold';
       case 'redeemed':
         return 'text-emerald-700 font-bold';
       case 'expired':
-        return 'text-rose-700';
+        return 'text-rose-700 font-semibold';
+      case 'cancelled':
+        return 'text-rose-800 line-through font-bold';
     }
   };
 
@@ -397,12 +437,12 @@ export function AdminLinksTab({
         <section className="rounded-2xl border border-slate-200 bg-white p-5 sm:p-6 lg:col-span-7">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
             <div>
-              <h2 className="text-base font-extrabold text-slate-900">
-                إرسال رابط صندوق السعادة لمريض
+              <h2 className="text-base font-extrabold text-[#5C1422]">
+                إرسال رابط صندوق الفرحة لمريض
               </h2>
               <p className="text-xs text-slate-500">
-                أنشئ رابطاً خاصاً بالمريض وأرسله عبر واتساب — وتظهر نتيجته هنا فور فتحه. رقم واتساب المعمل المفعّل للإرسال والاستقبال:{' '}
-                <span dir="ltr" className="font-mono font-bold text-teal-800">
+                تُحسم الجائزة مسبقاً عند الإنشاء لضمان المصداقية، رقم الواتساب المفعّل:{' '}
+                <span dir="ltr" className="font-mono font-bold text-[#5C1422]">
                   +{formatWhatsAppPhone(labProfile.whatsappNumber || labProfile.hotlineNumber)}
                 </span>
               </p>
@@ -410,7 +450,7 @@ export function AdminLinksTab({
             <button
               type="button"
               onClick={() => copyText(publicBase, 'universal')}
-              className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2 text-xs font-bold text-slate-700 hover:bg-slate-100 cursor-pointer whitespace-nowrap shrink-0"
+              className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border border-slate-200 bg-[#FAF7F4] px-3.5 py-2 text-xs font-bold text-[#5C1422] hover:bg-slate-100 cursor-pointer whitespace-nowrap shrink-0"
             >
               {copiedId === 'universal' ? (
                 <>
@@ -435,7 +475,7 @@ export function AdminLinksTab({
                 value={clientName}
                 onChange={(e) => setClientName(e.target.value)}
                 placeholder="مثال: محمد أحمد علي"
-                className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm focus:border-teal-700 focus:outline-none"
+                className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm focus:border-[#5C1422] focus:outline-none"
               />
             </div>
             <div>
@@ -447,7 +487,7 @@ export function AdminLinksTab({
                 value={clientPhone}
                 onChange={(e) => setClientPhone(e.target.value)}
                 placeholder="010xxxxxxxx"
-                className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-left font-mono text-sm focus:border-teal-700 focus:outline-none"
+                className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-left font-mono text-sm focus:border-[#5C1422] focus:outline-none"
               />
             </div>
             <div>
@@ -455,7 +495,7 @@ export function AdminLinksTab({
               <select
                 value={branchName}
                 onChange={(e) => setBranchName(e.target.value)}
-                className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm focus:border-teal-700 focus:outline-none"
+                className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm focus:border-[#5C1422] focus:outline-none"
               >
                 {labProfile.branches.map((br) => (
                   <option key={br} value={br}>
@@ -466,14 +506,14 @@ export function AdminLinksTab({
             </div>
             <div className="grid grid-cols-2 gap-2">
               <div>
-                <label className="mb-1 block text-xs font-bold text-slate-700">رقم الزيارة (اختياري)</label>
+                <label className="mb-1 block text-xs font-bold text-slate-700">رقم الزيارة</label>
                 <input
                   type="text"
                   dir="ltr"
                   value={visitRef}
                   onChange={(e) => setVisitRef(e.target.value)}
                   placeholder="RT-2041"
-                  className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-left font-mono text-sm focus:border-teal-700 focus:outline-none"
+                  className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-left font-mono text-sm focus:border-[#5C1422] focus:outline-none"
                 />
               </div>
               <div>
@@ -484,30 +524,81 @@ export function AdminLinksTab({
                   max={90}
                   value={linkValidDays}
                   onChange={(e) => setLinkValidDays(Number(e.target.value) || 14)}
-                  className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-center font-mono text-sm focus:border-teal-700 focus:outline-none"
+                  className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-center font-mono text-sm focus:border-[#5C1422] focus:outline-none"
                 />
               </div>
+            </div>
+
+            <div>
+              <label className="mb-1 block text-xs font-bold text-slate-700">نمط اللعبة التفاعلية</label>
+              <select
+                value={gameMode}
+                onChange={(e) => setGameMode(e.target.value as GameMode)}
+                className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-xs font-bold text-[#5C1422] focus:border-[#5C1422] focus:outline-none"
+              >
+                {ALL_GAME_MODES.map((gm) => (
+                  <option key={gm} value={gm}>
+                    {GAME_MODE_META[gm].nameAr}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="mb-1 block text-xs font-bold text-slate-700">مستوى الولاء</label>
+                <select
+                  value={loyaltyTier}
+                  onChange={(e) => setLoyaltyTier(e.target.value as LoyaltyTier)}
+                  className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-xs font-bold focus:border-[#5C1422] focus:outline-none"
+                >
+                  <option value="Basic">Basic</option>
+                  <option value="Plus">Plus</option>
+                  <option value="VIP">VIP</option>
+                </select>
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-bold text-slate-700">الحملة (اختياري)</label>
+                <input
+                  type="text"
+                  value={campaignName}
+                  onChange={(e) => setCampaignName(e.target.value)}
+                  placeholder="حملة الفحص"
+                  className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-xs focus:border-[#5C1422] focus:outline-none"
+                />
+              </div>
+            </div>
+
+            <div className="sm:col-span-2">
+              <label className="inline-flex items-center gap-2 text-xs font-bold text-slate-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={isBirthdayGift}
+                  onChange={(e) => setIsBirthdayGift(e.target.checked)}
+                  className="h-4 w-4 accent-[#5C1422]"
+                />
+                <span>تفعيل وسم هدية عيد ميلاد (يضاعف نقاط الولاء الابتدائية)</span>
+              </label>
             </div>
 
             <div className="sm:col-span-2 pt-1">
               <button
                 type="submit"
                 disabled={creating}
-                className="flex min-h-[46px] w-full items-center justify-center gap-2 rounded-xl bg-teal-700 px-5 py-2.5 text-sm font-extrabold text-white transition-colors hover:bg-teal-800 disabled:opacity-60 cursor-pointer"
+                className="flex min-h-[46px] w-full items-center justify-center gap-2 rounded-xl bg-[#5C1422] px-5 py-2.5 text-sm font-extrabold text-white transition-colors hover:bg-[#7A1C2E] disabled:opacity-60 cursor-pointer"
               >
-                <Plus className="h-4 w-4" />
-                <span>{creating ? 'جاري الإنشاء...' : 'إنشاء رابط صندوق السعادة للمريض'}</span>
+                <Plus className="h-4 w-4 text-[#E7C15A]" />
+                <span>{creating ? 'جاري الإنشاء...' : 'إنشاء رابط صندوق الفرحة للمريض'}</span>
               </button>
             </div>
           </form>
 
           {lastCreated ? (
-            <div className="mt-4 space-y-3 rounded-2xl border border-teal-200 bg-teal-50/50 p-4">
+            <div className="mt-4 space-y-3 rounded-2xl border border-[#C9962D]/40 bg-[#FFF8EB] p-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-xs font-extrabold text-teal-900">
-                  جاهز للإرسال إلى: {lastCreated.clientName}
+                <span className="text-xs font-extrabold text-[#5C1422]">
+                  جاهز للإرسال إلى: {lastCreated.clientName} ({GAME_MODE_META[lastCreated.gameMode || 'box'].nameAr})
                 </span>
-                <span dir="ltr" className="font-mono text-xs font-bold text-teal-800">
+                <span dir="ltr" className="font-mono text-xs font-bold text-[#7A5600]">
                   {lastCreated.token}
                 </span>
               </div>
@@ -516,9 +607,9 @@ export function AdminLinksTab({
                   href={buildAdminInviteWhatsAppUrl(lastCreated, labProfile, publicBase, prizes)}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl bg-teal-700 px-4 py-2 text-xs font-bold text-white hover:bg-teal-800"
+                  className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl bg-[#5C1422] px-4 py-2 text-xs font-bold text-white hover:bg-[#7A1C2E]"
                 >
-                  <MessageCircle className="h-4 w-4" />
+                  <MessageCircle className="h-4 w-4 text-[#E7C15A]" />
                   <span>إرسال رابط البوكس عبر واتساب</span>
                 </a>
                 <button
@@ -544,40 +635,60 @@ export function AdminLinksTab({
           ) : null}
         </section>
 
-        {/* Quick Redeem Code */}
+        {/* Quick Redeem Code + ROI Financial Tracking */}
         <section className="flex flex-col justify-between rounded-2xl border border-slate-200 bg-white p-5 sm:p-6 lg:col-span-5">
           <div className="space-y-3">
             <div className="flex items-center gap-2">
-              <ShieldCheck className="h-5 w-5 text-teal-700" />
-              <h2 className="text-base font-extrabold text-slate-900">صرف وتفعيل كود الجائزة</h2>
+              <ShieldCheck className="h-5 w-5 text-[#5C1422]" />
+              <h2 className="text-base font-extrabold text-slate-900">صرف وتفعيل كود الجائزة (منع التكرار)</h2>
             </div>
             <p className="text-xs leading-relaxed text-slate-500">
-              عند وصول رسالة الفوز من المريض أو حضوره للمعمل، أدخل كود الجائزة لتأكيد الصرف وإغلاق الكود فوراً.
+              أدخل كود الجائزة عند حضور المريض مع قيمة الفاتورة وتكلفة الهدية (اختياري) لحساب صافي العائد ROI بدقة.
             </p>
-            <div className="flex gap-2 pt-1">
-              <input
-                type="text"
-                dir="ltr"
-                value={redeemCode}
-                onChange={(e) => setRedeemCode(e.target.value)}
-                placeholder="RTWIN-XXXXXX"
-                className="flex-1 rounded-xl border border-slate-300 bg-slate-50 px-3.5 py-2.5 text-left font-mono text-sm font-bold uppercase text-slate-900 focus:border-teal-700 focus:bg-white focus:outline-none"
-              />
-              <button
-                type="button"
-                disabled={redeeming || !redeemCode.trim()}
-                onClick={() => handleRedeem(redeemCode)}
-                className="inline-flex min-h-[44px] items-center gap-1.5 rounded-xl bg-slate-900 px-4 py-2 text-xs font-extrabold text-white hover:bg-slate-800 disabled:opacity-50 cursor-pointer whitespace-nowrap"
-              >
-                <CheckCircle2 className="h-4 w-4" />
-                <span>تأكيد الصرف</span>
-              </button>
+            <div className="space-y-2 pt-1">
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  dir="ltr"
+                  value={redeemCode}
+                  onChange={(e) => setRedeemCode(e.target.value)}
+                  placeholder="RTWIN-XXXXXX"
+                  className="flex-1 rounded-xl border border-slate-300 bg-slate-50 px-3.5 py-2.5 text-left font-mono text-sm font-bold uppercase text-slate-900 focus:border-[#5C1422] focus:bg-white focus:outline-none"
+                />
+                <button
+                  type="button"
+                  disabled={redeeming || !redeemCode.trim()}
+                  onClick={() => handleRedeem(redeemCode)}
+                  className="inline-flex min-h-[44px] items-center gap-1.5 rounded-xl bg-[#5C1422] px-4 py-2 text-xs font-extrabold text-white hover:bg-[#7A1C2E] disabled:opacity-50 cursor-pointer whitespace-nowrap"
+                >
+                  <CheckCircle2 className="h-4 w-4 text-[#E7C15A]" />
+                  <span>تأكيد الصرف</span>
+                </button>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <input
+                  type="number"
+                  min={0}
+                  value={redeemInvoice}
+                  onChange={(e) => setRedeemInvoice(e.target.value)}
+                  placeholder="قيمة الفاتورة (ج.م)"
+                  className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-center font-mono text-xs text-slate-900 focus:border-[#5C1422] focus:bg-white focus:outline-none"
+                />
+                <input
+                  type="number"
+                  min={0}
+                  value={redeemCost}
+                  onChange={(e) => setRedeemCost(e.target.value)}
+                  placeholder="تكلفة المكافأة (ج.م)"
+                  className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-center font-mono text-xs text-slate-900 focus:border-[#5C1422] focus:bg-white focus:outline-none"
+                />
+              </div>
             </div>
           </div>
 
-          <div className="mt-5 flex flex-col gap-3 rounded-xl border border-slate-100 bg-slate-50 p-3.5 text-xs text-slate-600">
+          <div className="mt-5 flex flex-col gap-3 rounded-xl border border-[#C9962D]/30 bg-[#FAF7F4] p-3.5 text-xs text-slate-600">
             <div>
-              <strong className="text-slate-800">مزامنة سحابية لحظية:</strong> أي مريض يفتح صندوق السعادة من أي هاتف تظهر بياناته وجائزته هنا مباشرة.
+              <strong className="text-[#5C1422]">مزامنة أونلاين وأوفلاين:</strong> يتم تسجيل جميع الأكواد والمبالغ محلياً وتتم مزامنتها تلقائياً عند الاتصال بالسحابة.
             </div>
             <button
               type="button"
@@ -594,21 +705,21 @@ export function AdminLinksTab({
         </section>
       </div>
 
-      {/* Unsynced Bookings Recovery Drawer (WhatsApp / Manual) */}
-      <section className="rounded-2xl border border-amber-200 bg-amber-50/40 p-5 sm:p-6">
+      {/* Unsynced Bookings Recovery Drawer */}
+      <section className="rounded-2xl border border-[#C9962D]/40 bg-[#FFF8EB]/60 p-5 sm:p-6">
         <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
           <div>
-            <h2 className="text-base font-extrabold text-slate-900">
+            <h2 className="text-base font-extrabold text-[#5C1422]">
               جلب وتفعيل الحجوزات غير المسمّعة في البرنامج
             </h2>
             <p className="text-xs text-slate-600">
-              إذا وصلتك رسائل جوائز من المرضى على واتساب المعمل ولم تظهر في السجل، الصق رسائل الواتساب هنا (رسالة واحدة أو عدة رسائل معاً) أو أضف الحجز يدوياً لتفعيله وحفظه فوراً.
+              إذا وصلتك رسائل جوائز من المرضى على واتساب المعمل ولم تظهر في السجل، الصق رسائل الواتساب هنا أو أضف الحجز يدوياً.
             </p>
           </div>
           <button
             type="button"
             onClick={() => setShowRecovery((v) => !v)}
-            className="inline-flex min-h-[42px] shrink-0 items-center gap-1.5 rounded-xl bg-amber-600 px-4 py-2 text-xs font-extrabold text-white shadow-xs transition-colors hover:bg-amber-700 cursor-pointer whitespace-nowrap"
+            className="inline-flex min-h-[42px] shrink-0 items-center gap-1.5 rounded-xl bg-[#C9962D] px-4 py-2 text-xs font-extrabold text-[#3A0A14] shadow-xs transition-colors hover:bg-[#B8860B] cursor-pointer whitespace-nowrap"
           >
             <Download className="h-4 w-4" />
             <span>{showRecovery ? 'إغلاق أداة الجلب' : 'جلب وتفعيل الحجوزات (واتساب / يدوي)'}</span>
@@ -616,14 +727,14 @@ export function AdminLinksTab({
         </div>
 
         {showRecovery ? (
-          <div className="mt-4 space-y-4 border-t border-amber-200/80 pt-4">
+          <div className="mt-4 space-y-4 border-t border-[#C9962D]/30 pt-4">
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
                 onClick={() => setRecoveryMode('whatsapp')}
                 className={`rounded-xl px-3.5 py-2 text-xs font-extrabold transition-colors cursor-pointer ${
                   recoveryMode === 'whatsapp'
-                    ? 'bg-teal-700 text-white'
+                    ? 'bg-[#5C1422] text-white'
                     : 'border border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
                 }`}
               >
@@ -634,7 +745,7 @@ export function AdminLinksTab({
                 onClick={() => setRecoveryMode('manual')}
                 className={`rounded-xl px-3.5 py-2 text-xs font-extrabold transition-colors cursor-pointer ${
                   recoveryMode === 'manual'
-                    ? 'bg-teal-700 text-white'
+                    ? 'bg-[#5C1422] text-white'
                     : 'border border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
                 }`}
               >
@@ -648,7 +759,7 @@ export function AdminLinksTab({
                 <select
                   value={recoveryBranch}
                   onChange={(e) => setRecoveryBranch(e.target.value)}
-                  className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 focus:border-teal-700 focus:outline-none"
+                  className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 focus:border-[#5C1422] focus:outline-none"
                 >
                   {labProfile.branches.map((br) => (
                     <option key={br} value={br}>
@@ -662,10 +773,10 @@ export function AdminLinksTab({
                 <select
                   value={recoveryStatus}
                   onChange={(e) => setRecoveryStatus(e.target.value as 'opened' | 'redeemed')}
-                  className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 focus:border-teal-700 focus:outline-none"
+                  className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs text-slate-900 focus:border-[#5C1422] focus:outline-none"
                 >
-                  <option value="opened">كسب — مفعّل وبانتظار الصرف بالمعمل</option>
-                  <option value="redeemed">تم الصرف بالمعمل بالفعل</option>
+                  <option value="opened">مكتشف — مفعّل وبانتظار الصرف بالمعمل</option>
+                  <option value="redeemed">مستخدم — تم الصرف بالمعمل</option>
                 </select>
               </div>
               {recoveryMode === 'whatsapp' ? (
@@ -679,7 +790,7 @@ export function AdminLinksTab({
                     value={recoveryFallbackPhone}
                     onChange={(e) => setRecoveryFallbackPhone(e.target.value)}
                     placeholder="010xxxxxxxx"
-                    className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-left font-mono text-xs text-slate-900 focus:border-teal-700 focus:outline-none"
+                    className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-left font-mono text-xs text-slate-900 focus:border-[#5C1422] focus:outline-none"
                   />
                 </div>
               ) : null}
@@ -692,12 +803,12 @@ export function AdminLinksTab({
                   value={recoveryText}
                   onChange={(e) => setRecoveryText(e.target.value)}
                   placeholder={`الصق هنا رسالة أو عدة رسائل وصلتك على واتساب من المرضى مثل:\nالاسم: أحمد محمد\nالجائزة: تحليل CBC مجاناً (مجاناً 100%)\nكود الجائزة: RTWIN-AB12CD`}
-                  className="w-full rounded-xl border border-slate-300 bg-white p-3 text-xs leading-relaxed text-slate-900 focus:border-teal-700 focus:outline-none"
+                  className="w-full rounded-xl border border-slate-300 bg-white p-3 text-xs leading-relaxed text-slate-900 focus:border-[#5C1422] focus:outline-none"
                 />
                 <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
                   <div className="text-xs font-bold text-slate-700">
                     {parsedWhatsAppBookings.length > 0 ? (
-                      <span className="text-teal-800">
+                      <span className="text-[#5C1422]">
                         تم رصد {parsedWhatsAppBookings.length} حجز جاهز للجلب والتفعيل:{' '}
                         {parsedWhatsAppBookings
                           .slice(0, 3)
@@ -715,9 +826,9 @@ export function AdminLinksTab({
                     type="button"
                     disabled={importingRecovery || parsedWhatsAppBookings.length === 0}
                     onClick={() => void handleImportWhatsAppBookings()}
-                    className="inline-flex min-h-[42px] shrink-0 items-center justify-center gap-1.5 rounded-xl bg-teal-700 px-5 py-2 text-xs font-extrabold text-white hover:bg-teal-800 disabled:opacity-50 cursor-pointer whitespace-nowrap"
+                    className="inline-flex min-h-[42px] shrink-0 items-center justify-center gap-1.5 rounded-xl bg-[#5C1422] px-5 py-2 text-xs font-extrabold text-white hover:bg-[#7A1C2E] disabled:opacity-50 cursor-pointer whitespace-nowrap"
                   >
-                    <CheckCircle2 className="h-4 w-4" />
+                    <CheckCircle2 className="h-4 w-4 text-[#E7C15A]" />
                     <span>
                       {importingRecovery
                         ? 'جاري الجلب والتفعيل...'
@@ -737,7 +848,7 @@ export function AdminLinksTab({
                   value={manualName}
                   onChange={(e) => setManualName(e.target.value)}
                   placeholder="اسم المريض *"
-                  className="sm:col-span-3 rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs focus:border-teal-700 focus:outline-none"
+                  className="sm:col-span-3 rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs focus:border-[#5C1422] focus:outline-none"
                 />
                 <input
                   type="tel"
@@ -745,7 +856,7 @@ export function AdminLinksTab({
                   value={manualPhone}
                   onChange={(e) => setManualPhone(e.target.value)}
                   placeholder="010xxxxxxxx"
-                  className="sm:col-span-2 rounded-xl border border-slate-300 bg-white px-3 py-2 text-left font-mono text-xs focus:border-teal-700 focus:outline-none"
+                  className="sm:col-span-2 rounded-xl border border-slate-300 bg-white px-3 py-2 text-left font-mono text-xs focus:border-[#5C1422] focus:outline-none"
                 />
                 <input
                   type="text"
@@ -754,7 +865,7 @@ export function AdminLinksTab({
                   value={manualPrizeTitle}
                   onChange={(e) => setManualPrizeTitle(e.target.value)}
                   placeholder="اختر أو اكتب اسم الجائزة *"
-                  className="sm:col-span-4 rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs focus:border-teal-700 focus:outline-none"
+                  className="sm:col-span-4 rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs focus:border-[#5C1422] focus:outline-none"
                 />
                 <datalist id="rt-prizes-datalist">
                   {prizes.map((p) => (
@@ -767,15 +878,15 @@ export function AdminLinksTab({
                   value={manualPrizeCode}
                   onChange={(e) => setManualPrizeCode(e.target.value)}
                   placeholder="كود الجائزة (اختياري)"
-                  className="sm:col-span-3 rounded-xl border border-slate-300 bg-white px-3 py-2 text-left font-mono text-xs uppercase focus:border-teal-700 focus:outline-none"
+                  className="sm:col-span-3 rounded-xl border border-slate-300 bg-white px-3 py-2 text-left font-mono text-xs uppercase focus:border-[#5C1422] focus:outline-none"
                 />
                 <div className="sm:col-span-12 flex justify-end">
                   <button
                     type="submit"
                     disabled={importingRecovery}
-                    className="inline-flex min-h-[42px] items-center gap-1.5 rounded-xl bg-teal-700 px-5 py-2 text-xs font-extrabold text-white hover:bg-teal-800 disabled:opacity-60 cursor-pointer"
+                    className="inline-flex min-h-[42px] items-center gap-1.5 rounded-xl bg-[#5C1422] px-5 py-2 text-xs font-extrabold text-white hover:bg-[#7A1C2E] disabled:opacity-60 cursor-pointer"
                   >
-                    <CheckCircle2 className="h-4 w-4" />
+                    <CheckCircle2 className="h-4 w-4 text-[#E7C15A]" />
                     <span>{importingRecovery ? 'جاري التفعيل...' : 'إضافة وتفعيل الحجز الآن'}</span>
                   </button>
                 </div>
@@ -790,10 +901,10 @@ export function AdminLinksTab({
         <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h2 className="text-base font-extrabold text-slate-900">
-              سجل المرضى والجوائز ({filteredLinks.length})
+              سجل المرضى والأكواد ({filteredLinks.length})
             </h2>
             <p className="text-xs text-slate-500">
-              حدّد موعد الحضور أو السحب المنزلي وأرسل للمريض رسالة تأكيد الفوز والوقت المحدد عبر واتساب.
+              متابعة كاملة لدورة حياة الكود: جديد · مكتشف · مستخدم · منتهي · ملغي، مع المواعيد والفواتير.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -801,40 +912,41 @@ export function AdminLinksTab({
               type="button"
               disabled={syncingList}
               onClick={() => void handleManualCloudSync()}
-              className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl border border-teal-200 bg-teal-50 px-3 py-1.5 text-xs font-bold text-teal-900 hover:bg-teal-100 disabled:opacity-60 cursor-pointer whitespace-nowrap"
+              className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl border border-[#5C1422]/20 bg-[#5C1422]/5 px-3 py-1.5 text-xs font-bold text-[#5C1422] hover:bg-[#5C1422]/10 disabled:opacity-60 cursor-pointer whitespace-nowrap"
             >
               <RefreshCw className={`h-3.5 w-3.5 ${syncingList ? 'animate-spin' : ''}`} />
               <span>{syncingList ? 'جاري الجلب...' : 'مزامنة السحابة'}</span>
             </button>
-            <div className="relative min-w-[210px] flex-1 sm:flex-initial">
+            <div className="relative min-w-[200px] flex-1 sm:flex-initial">
               <Search className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
               <input
                 type="text"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="ابحث بالاسم، الهاتف، أو الكود..."
-                className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2 pr-9 pl-3 text-xs text-slate-900 focus:border-teal-700 focus:bg-white focus:outline-none"
+                placeholder="ابحث بالاسم، الهاتف، الكود..."
+                className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2 pr-9 pl-3 text-xs text-slate-900 focus:border-[#5C1422] focus:bg-white focus:outline-none"
               />
             </div>
             <div className="flex items-center gap-1 overflow-x-auto rounded-xl bg-slate-100 p-1">
               {[
                 { id: 'all', label: 'الكل' },
-                { id: 'opened', label: 'كسب' },
-                { id: 'pending', label: 'بانتظار الفتح' },
-                { id: 'redeemed', label: 'تم الصرف' },
+                { id: 'opened', label: 'مكتشف' },
+                { id: 'pending', label: 'جديد' },
+                { id: 'redeemed', label: 'مستخدم' },
                 { id: 'expired', label: 'منتهي' },
-              ].map((tab) => (
+                { id: 'cancelled', label: 'ملغي' },
+              ].map((t) => (
                 <button
-                  key={tab.id}
+                  key={t.id}
                   type="button"
-                  onClick={() => setStatusFilter(tab.id as typeof statusFilter)}
+                  onClick={() => setStatusFilter(t.id as typeof statusFilter)}
                   className={`rounded-lg px-2.5 py-1.5 text-xs font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                    statusFilter === tab.id
-                      ? 'bg-white text-slate-900 shadow-xs'
-                      : 'text-slate-600 hover:text-slate-900'
+                    statusFilter === t.id
+                      ? 'bg-[#5C1422] text-white shadow-xs'
+                      : 'text-slate-600 hover:text-[#5C1422]'
                   }`}
                 >
-                  {tab.label}
+                  {t.label}
                 </button>
               ))}
             </div>
@@ -864,26 +976,48 @@ export function AdminLinksTab({
                         <span className={`text-xs ${statusColor(lnk.status)}`}>
                           {statusText(lnk.status)}
                         </span>
+                        {lnk.loyaltyTier ? (
+                          <span className="rounded-md border border-[#C9962D]/40 bg-[#FFF8EB] px-1.5 py-0.5 text-[10px] font-extrabold text-[#5C1422]">
+                            {lnk.loyaltyTier}
+                          </span>
+                        ) : null}
+                        {lnk.gameMode && lnk.gameMode !== 'box' ? (
+                          <span className="rounded-md bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold text-slate-600">
+                            {GAME_MODE_META[lnk.gameMode].nameAr}
+                          </span>
+                        ) : null}
+                        {lnk.isBirthdayGift ? (
+                          <span className="rounded-md bg-rose-50 px-1.5 py-0.5 text-[10px] font-bold text-rose-700">
+                            عيد ميلاد
+                          </span>
+                        ) : null}
                       </div>
 
                       {lnk.prizeTitle ? (
                         <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600">
-                          <span className="font-bold text-teal-800">{lnk.prizeTitle}</span>
+                          <span className="font-bold text-[#5C1422]">{lnk.prizeTitle}</span>
                           <span aria-hidden="true">·</span>
                           <span dir="ltr" className="font-mono font-bold text-slate-800 tabular-nums">
                             {lnk.prizeCode}
                           </span>
                           <span aria-hidden="true">·</span>
-                          <span className="inline-flex items-center gap-1 text-amber-700 font-semibold">
+                          <span className="inline-flex items-center gap-1 font-semibold text-[#B8860B]">
                             <Clock className="h-3.5 w-3.5" />
                             <span>
                               {lnk.status === 'redeemed'
                                 ? `صُرفت في ${formatArabicDate(lnk.redeemedAt)}`
-                                : rem.expired
-                                  ? 'انتهى الوقت المحدد'
-                                  : `${rem.humanLabel} (حتى ${formatArabicDate(lnk.expiresAt)})`}
+                                : lnk.status === 'cancelled'
+                                  ? `أُلغيت في ${formatArabicDate(lnk.cancelledAt)}`
+                                  : rem.expired
+                                    ? 'انتهى الوقت المحدد'
+                                    : `${rem.humanLabel} (حتى ${formatArabicDate(lnk.expiresAt)})`}
                             </span>
                           </span>
+                          {typeof lnk.invoiceAmount === 'number' ? (
+                            <span className="rounded-md bg-emerald-50 px-2 py-0.5 font-mono text-[11px] font-bold text-emerald-800">
+                              فاتورة: {lnk.invoiceAmount} ج.م
+                            </span>
+                          ) : null}
                         </div>
                       ) : (
                         <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
@@ -896,11 +1030,11 @@ export function AdminLinksTab({
                       )}
 
                       {lnk.appointmentAt ? (
-                        <div className="inline-flex flex-wrap items-center gap-1.5 rounded-lg bg-teal-50 px-2.5 py-1 text-xs font-bold text-teal-900">
-                          <CalendarClock className="h-3.5 w-3.5 text-teal-700" />
+                        <div className="inline-flex flex-wrap items-center gap-1.5 rounded-lg bg-[#5C1422]/8 px-2.5 py-1 text-xs font-bold text-[#5C1422]">
+                          <CalendarClock className="h-3.5 w-3.5" />
                           <span>الموعد المحدد: {lnk.appointmentAt}</span>
                           {lnk.appointmentNote ? (
-                            <span className="font-medium text-teal-700">({lnk.appointmentNote})</span>
+                            <span className="font-medium opacity-80">({lnk.appointmentNote})</span>
                           ) : null}
                         </div>
                       ) : null}
@@ -912,9 +1046,9 @@ export function AdminLinksTab({
                           href={buildAdminInviteWhatsAppUrl(lnk, labProfile, publicBase, prizes)}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl bg-teal-700 px-3.5 py-2 text-xs font-bold text-white hover:bg-teal-800 whitespace-nowrap"
+                          className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl bg-[#5C1422] px-3.5 py-2 text-xs font-bold text-white hover:bg-[#7A1C2E] whitespace-nowrap"
                         >
-                          <MessageCircle className="h-3.5 w-3.5" />
+                          <MessageCircle className="h-3.5 w-3.5 text-[#E7C15A]" />
                           <span>إرسال الرابط واتساب</span>
                         </a>
                       ) : null}
@@ -924,21 +1058,21 @@ export function AdminLinksTab({
                         onClick={() =>
                           isEditingAppt ? setEditingApptId(null) : openAppointmentEditor(lnk)
                         }
-                        className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl border border-teal-200 bg-teal-50 px-3 py-2 text-xs font-bold text-teal-900 hover:bg-teal-100 cursor-pointer whitespace-nowrap"
+                        className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl border border-[#5C1422]/20 bg-[#FAF7F4] px-3 py-2 text-xs font-bold text-[#5C1422] hover:bg-slate-100 cursor-pointer whitespace-nowrap"
                       >
-                        <CalendarClock className="h-3.5 w-3.5 text-teal-700" />
+                        <CalendarClock className="h-3.5 w-3.5" />
                         <span>{lnk.appointmentAt ? 'تعديل الموعد' : 'تحديد الموعد'}</span>
                       </button>
 
-                      {lnk.prizeTitle ? (
+                      {lnk.prizeTitle && lnk.status !== 'pending' && lnk.status !== 'cancelled' ? (
                         <a
                           href={buildAdminWinnerReplyWhatsAppUrl(lnk, labProfile)}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl bg-amber-600 px-3.5 py-2 text-xs font-bold text-white hover:bg-amber-700 whitespace-nowrap"
+                          className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl bg-[#C9962D] px-3.5 py-2 text-xs font-extrabold text-[#3A0A14] hover:bg-[#B8860B] whitespace-nowrap"
                         >
                           <MessageCircle className="h-3.5 w-3.5" />
-                          <span>رد بالمبروك والموعد (واتساب)</span>
+                          <span>رد بالمبروك والموعد</span>
                         </a>
                       ) : null}
 
@@ -950,6 +1084,18 @@ export function AdminLinksTab({
                         >
                           <CheckCircle2 className="h-3.5 w-3.5" />
                           <span>تأكيد الصرف</span>
+                        </button>
+                      ) : null}
+
+                      {(lnk.status === 'pending' || lnk.status === 'opened') ? (
+                        <button
+                          type="button"
+                          onClick={() => void handleCancelLink(lnk.id)}
+                          title="إلغاء الكود"
+                          className="inline-flex min-h-[38px] items-center gap-1 rounded-xl border border-rose-200 bg-rose-50 px-2.5 py-2 text-xs font-bold text-rose-800 hover:bg-rose-100 cursor-pointer whitespace-nowrap"
+                        >
+                          <Ban className="h-3.5 w-3.5" />
+                          <span>إلغاء</span>
                         </button>
                       ) : null}
 
@@ -974,7 +1120,7 @@ export function AdminLinksTab({
                       <button
                         type="button"
                         onClick={() => handleDeleteLink(lnk.id)}
-                        title="حذف"
+                        title="حذف نهائي"
                         className="inline-flex min-h-[38px] items-center justify-center rounded-xl border border-slate-200 bg-white px-2.5 text-slate-400 hover:border-rose-200 hover:text-rose-700 cursor-pointer"
                       >
                         <Trash2 className="h-3.5 w-3.5" />
@@ -984,27 +1130,27 @@ export function AdminLinksTab({
 
                   {/* Inline Appointment Editor */}
                   {isEditingAppt ? (
-                    <div className="grid grid-cols-1 gap-2 rounded-xl border border-teal-200 bg-teal-50/40 p-3 sm:grid-cols-12">
+                    <div className="grid grid-cols-1 gap-2 rounded-xl border border-[#C9962D]/40 bg-[#FFF8EB] p-3 sm:grid-cols-12">
                       <input
                         type="text"
                         value={apptTime}
                         onChange={(e) => setApptTime(e.target.value)}
                         placeholder="الموعد (مثال: غداً الثلاثاء 11 صباحاً - فرع شبرا)"
-                        className="sm:col-span-5 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs focus:border-teal-700 focus:outline-none"
+                        className="sm:col-span-5 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs focus:border-[#5C1422] focus:outline-none"
                       />
                       <input
                         type="text"
                         value={apptNote}
                         onChange={(e) => setApptNote(e.target.value)}
                         placeholder="ملاحظة (مثال: صيام 12 ساعة / سحب منزلي)"
-                        className="sm:col-span-5 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs focus:border-teal-700 focus:outline-none"
+                        className="sm:col-span-5 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs focus:border-[#5C1422] focus:outline-none"
                       />
                       <div className="flex gap-1.5 sm:col-span-2">
                         <button
                           type="button"
                           disabled={savingAppt}
                           onClick={() => handleSaveAppointment(lnk.id)}
-                          className="inline-flex flex-1 items-center justify-center gap-1 rounded-lg bg-teal-700 px-3 py-2 text-xs font-bold text-white hover:bg-teal-800 cursor-pointer"
+                          className="inline-flex flex-1 items-center justify-center gap-1 rounded-lg bg-[#5C1422] px-3 py-2 text-xs font-bold text-white hover:bg-[#7A1C2E] cursor-pointer"
                         >
                           <Save className="h-3.5 w-3.5" />
                           <span>حفظ</span>

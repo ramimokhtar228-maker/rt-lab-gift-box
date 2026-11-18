@@ -22,6 +22,8 @@ interface AdminPrizesTabProps {
   onNotify: (msg: string, isError?: boolean) => void;
 }
 
+type NormalizedCategory = 'DISCOUNT' | 'FREE_SERVICE' | 'PAID_OFFER' | 'PHYSICAL_GIFT' | 'SURPRISE';
+
 const EMPTY_PRIZE: Partial<Prize> = {
   title: '',
   description: '',
@@ -34,7 +36,7 @@ const EMPTY_PRIZE: Partial<Prize> = {
   active: true,
 };
 
-function normalizePrizeCategory(cat: PrizeCategory): 'DISCOUNT' | 'FREE_SERVICE' | 'PHYSICAL_GIFT' | 'SURPRISE' {
+function normalizePrizeCategory(cat: PrizeCategory): NormalizedCategory {
   switch (cat) {
     case 'DISCOUNT':
     case 'discount':
@@ -44,6 +46,8 @@ function normalizePrizeCategory(cat: PrizeCategory): 'DISCOUNT' | 'FREE_SERVICE'
     case 'package':
     case 'home_visit':
       return 'FREE_SERVICE';
+    case 'PAID_OFFER':
+      return 'PAID_OFFER';
     case 'PHYSICAL_GIFT':
     case 'gift':
       return 'PHYSICAL_GIFT';
@@ -61,14 +65,12 @@ export function AdminPrizesTab({
   const [editing, setEditing] = useState<Partial<Prize> | null>(null);
   const [saving, setSaving] = useState(false);
 
-  // Filter & Search
-  const [categoryFilter, setCategoryFilter] = useState<'ALL' | 'DISCOUNT' | 'FREE_SERVICE' | 'PHYSICAL_GIFT' | 'SURPRISE'>('ALL');
+  const [categoryFilter, setCategoryFilter] = useState<'ALL' | NormalizedCategory>('ALL');
   const [search, setSearch] = useState('');
 
-  // Bulk Paste Import
   const [showBulkModal, setShowBulkModal] = useState(false);
   const [bulkText, setBulkText] = useState('');
-  const [bulkCategory, setBulkCategory] = useState<'DISCOUNT' | 'FREE_SERVICE' | 'PHYSICAL_GIFT' | 'SURPRISE'>('DISCOUNT');
+  const [bulkCategory, setBulkCategory] = useState<NormalizedCategory>('DISCOUNT');
   const [bulkHours, setBulkHours] = useState(72);
   const [bulkWeight, setBulkWeight] = useState(15);
   const [bulkStock, setBulkStock] = useState(50);
@@ -80,6 +82,7 @@ export function AdminPrizesTab({
       ALL: prizes.length,
       DISCOUNT: 0,
       FREE_SERVICE: 0,
+      PAID_OFFER: 0,
       PHYSICAL_GIFT: 0,
       SURPRISE: 0,
     };
@@ -146,6 +149,9 @@ export function AdminPrizesTab({
           discountLabel = `خصم ${pctMatch[0].replace(/\s+/g, '')}`;
         } else if (title.includes('مجاني') || title.includes('مجاناً')) {
           discountLabel = 'مجاني 100%';
+        } else if (bulkCategory === 'PAID_OFFER') {
+          const priceMatch = title.match(/(\d{2,4})/);
+          discountLabel = priceMatch ? `عرض ${priceMatch[1]} ج.م` : 'عرض خاص';
         } else if (title.includes('قسيمة')) {
           const valMatch = title.match(/\d+/);
           discountLabel = valMatch ? `قسيمة ${valMatch[0]} ج.م` : 'قسيمة شراء';
@@ -158,7 +164,7 @@ export function AdminPrizesTab({
           title,
           category: bulkCategory,
           discountLabel,
-          description: `${title} — جائزة من صندوق السعادة في معامل RT.`,
+          description: `${title} — جائزة من صندوق الفرحة في معامل RT.`,
           validHours: bulkHours,
           weight: bulkWeight,
           stock: bulkStock,
@@ -186,7 +192,7 @@ export function AdminPrizesTab({
       const res = await apiClient.seedFullPrizeCatalog();
       if (res.ok) {
         await onRefresh();
-        onNotify(`تم تحميل وتفعيل قائمة جوائز RT LAB الكاملة (${res.count} جائزة في 4 فئات).`);
+        onNotify(`تم تحميل وتفعيل قائمة جوائز RT LAB الكاملة (${res.count} جائزة شاملة العروض المدفوعة).`);
       }
     } catch {
       onNotify('تعذر مزامنة قائمة الجوائز الكاملة.', true);
@@ -246,11 +252,11 @@ export function AdminPrizesTab({
       {/* Header & Quick Actions */}
       <div className="flex flex-col justify-between gap-4 rounded-2xl border border-slate-200 bg-white p-5 lg:flex-row lg:items-center">
         <div>
-          <h2 className="text-base font-extrabold text-slate-900">
-            جوائز صندوق السعادة ({prizes.length} جائزة في 4 فئات)
+          <h2 className="text-base font-extrabold text-[#5C1422]">
+            بنك جوائز وعروض صندوق الفرحة ({prizes.length} جائزة في 5 فئات)
           </h2>
           <p className="text-xs text-slate-500">
-            عدّل أو عطّل أو احذف أي جائزة، أو الصق قائمة جوائز جديدة دفعة واحدة داخل التصنيفات الأربعة.
+            شاملة الخصومات، التحاليل المجانية، الباقات المدفوعة الخاصة، الهدايا المادية، ومفاجآت VIP.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2 shrink-0">
@@ -258,25 +264,25 @@ export function AdminPrizesTab({
             type="button"
             disabled={seedingCatalog}
             onClick={handleSeedFullCatalog}
-            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2 text-xs font-extrabold text-amber-900 hover:bg-amber-100 cursor-pointer whitespace-nowrap"
+            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border border-[#C9962D]/50 bg-[#FFF8EB] px-3.5 py-2 text-xs font-extrabold text-[#5C1422] hover:bg-[#FDEFD1] cursor-pointer whitespace-nowrap"
           >
-            <RefreshCw className={`h-3.5 w-3.5 ${seedingCatalog ? 'animate-spin' : ''}`} />
-            <span>{seedingCatalog ? 'جاري التحميل...' : `تفعيل قائمة RT LAB الكاملة (${DEFAULT_PRIZES.length} جائزة)`}</span>
+            <RefreshCw className={`h-3.5 w-3.5 text-[#B8860B] ${seedingCatalog ? 'animate-spin' : ''}`} />
+            <span>{seedingCatalog ? 'جاري التحميل...' : `تحديث الكتالوج الكامل (${DEFAULT_PRIZES.length})`}</span>
           </button>
           <button
             type="button"
             onClick={() => setShowBulkModal((v) => !v)}
             className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2 text-xs font-bold text-slate-800 hover:bg-slate-100 cursor-pointer whitespace-nowrap"
           >
-            <ListPlus className="h-4 w-4 text-teal-700" />
+            <ListPlus className="h-4 w-4 text-[#5C1422]" />
             <span>لصق قائمة جوائز</span>
           </button>
           <button
             type="button"
             onClick={() => setEditing({ ...EMPTY_PRIZE })}
-            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl bg-teal-700 px-4 py-2 text-xs font-extrabold text-white hover:bg-teal-800 cursor-pointer whitespace-nowrap"
+            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl bg-[#5C1422] px-4 py-2 text-xs font-extrabold text-white hover:bg-[#7A1C2E] cursor-pointer whitespace-nowrap"
           >
-            <Plus className="h-4 w-4" />
+            <Plus className="h-4 w-4 text-[#E7C15A]" />
             <span>إضافة جائزة</span>
           </button>
         </div>
@@ -286,10 +292,10 @@ export function AdminPrizesTab({
       {showBulkModal ? (
         <form
           onSubmit={handleBulkImport}
-          className="space-y-4 rounded-2xl border border-teal-200 bg-white p-5 sm:p-6"
+          className="space-y-4 rounded-2xl border border-[#C9962D]/40 bg-white p-5 sm:p-6"
         >
           <div className="flex items-center justify-between">
-            <h3 className="text-sm font-extrabold text-teal-900">
+            <h3 className="text-sm font-extrabold text-[#5C1422]">
               استيراد / لصق قائمة جوائز دفعة واحدة (كل جائزة في سطر)
             </h3>
             <button
@@ -305,19 +311,20 @@ export function AdminPrizesTab({
             required
             value={bulkText}
             onChange={(e) => setBulkText(e.target.value)}
-            placeholder={'الصق الجوائز هنا، كل جائزة في سطر مستقل:\nخصم 25% على جميع التحاليل.\nتحليل CBC مجاناً.\nقسيمة شراء بقيمة 100 جنيه.'}
-            className="w-full rounded-xl border border-slate-300 p-3.5 text-xs leading-relaxed focus:border-teal-700 focus:outline-none"
+            placeholder={'الصق الجوائز هنا، كل جائزة في سطر مستقل:\nخصم 25% على جميع التحاليل.\nتحليل CBC مجاناً.\nباقة 5 تحاليل بسعر خاص 299 جنيه.'}
+            className="w-full rounded-xl border border-slate-300 p-3.5 text-xs leading-relaxed focus:border-[#5C1422] focus:outline-none"
           />
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
             <div>
               <label className="mb-1 block text-xs font-bold text-slate-700">النوع في قاعدة البيانات</label>
               <select
                 value={bulkCategory}
-                onChange={(e) => setBulkCategory(e.target.value as typeof bulkCategory)}
-                className="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-bold focus:border-teal-700 focus:outline-none"
+                onChange={(e) => setBulkCategory(e.target.value as NormalizedCategory)}
+                className="w-full rounded-xl border border-slate-300 px-3 py-2 text-xs font-bold focus:border-[#5C1422] focus:outline-none"
               >
                 <option value="DISCOUNT">DISCOUNT — خصومات</option>
                 <option value="FREE_SERVICE">FREE_SERVICE — تحاليل وفحوصات وزيارات</option>
+                <option value="PAID_OFFER">PAID_OFFER — عروض وباقات مدفوعة خاصة</option>
                 <option value="PHYSICAL_GIFT">PHYSICAL_GIFT — هدايا مادية</option>
                 <option value="SURPRISE">SURPRISE — مفاجآت والسحب</option>
               </select>
@@ -330,7 +337,7 @@ export function AdminPrizesTab({
                 max={2160}
                 value={bulkHours}
                 onChange={(e) => setBulkHours(Number(e.target.value) || 72)}
-                className="w-full rounded-xl border border-slate-300 px-3 py-2 text-center font-mono text-xs focus:border-teal-700 focus:outline-none"
+                className="w-full rounded-xl border border-slate-300 px-3 py-2 text-center font-mono text-xs focus:border-[#5C1422] focus:outline-none"
               />
             </div>
             <div>
@@ -341,7 +348,7 @@ export function AdminPrizesTab({
                 max={1000}
                 value={bulkWeight}
                 onChange={(e) => setBulkWeight(Number(e.target.value) || 15)}
-                className="w-full rounded-xl border border-slate-300 px-3 py-2 text-center font-mono text-xs focus:border-teal-700 focus:outline-none"
+                className="w-full rounded-xl border border-slate-300 px-3 py-2 text-center font-mono text-xs focus:border-[#5C1422] focus:outline-none"
               />
             </div>
             <div>
@@ -352,7 +359,7 @@ export function AdminPrizesTab({
                 max={100000}
                 value={bulkStock}
                 onChange={(e) => setBulkStock(Number(e.target.value) || 50)}
-                className="w-full rounded-xl border border-slate-300 px-3 py-2 text-center font-mono text-xs focus:border-teal-700 focus:outline-none"
+                className="w-full rounded-xl border border-slate-300 px-3 py-2 text-center font-mono text-xs focus:border-[#5C1422] focus:outline-none"
               />
             </div>
           </div>
@@ -360,7 +367,7 @@ export function AdminPrizesTab({
             <button
               type="submit"
               disabled={importingBulk}
-              className="inline-flex min-h-[42px] items-center gap-1.5 rounded-xl bg-teal-700 px-5 py-2 text-xs font-extrabold text-white hover:bg-teal-800 cursor-pointer"
+              className="inline-flex min-h-[42px] items-center gap-1.5 rounded-xl bg-[#5C1422] px-5 py-2 text-xs font-extrabold text-white hover:bg-[#7A1C2E] cursor-pointer"
             >
               <Save className="h-4 w-4" />
               <span>{importingBulk ? 'جاري الاستيراد...' : 'إدخال القائمة لقاعدة البيانات'}</span>
@@ -373,9 +380,9 @@ export function AdminPrizesTab({
       {editing ? (
         <form
           onSubmit={handleSave}
-          className="space-y-4 rounded-2xl border border-teal-200 bg-white p-5 sm:p-6"
+          className="space-y-4 rounded-2xl border border-[#C9962D]/40 bg-white p-5 sm:p-6"
         >
-          <h3 className="text-sm font-extrabold text-teal-900">
+          <h3 className="text-sm font-extrabold text-[#5C1422]">
             {editing.id ? 'تعديل الجائزة' : 'إضافة جائزة جديدة للصندوق'}
           </h3>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -387,7 +394,7 @@ export function AdminPrizesTab({
                 value={editing.title || ''}
                 onChange={(e) => setEditing({ ...editing, title: e.target.value })}
                 placeholder="مثال: تحليل Vitamin D مجاناً"
-                className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm focus:border-teal-700 focus:outline-none"
+                className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm focus:border-[#5C1422] focus:outline-none"
               />
             </div>
             <div>
@@ -397,8 +404,8 @@ export function AdminPrizesTab({
                 required
                 value={editing.discountLabel || ''}
                 onChange={(e) => setEditing({ ...editing, discountLabel: e.target.value })}
-                placeholder="مثال: مجاني 100% أو خصم 30%"
-                className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm focus:border-teal-700 focus:outline-none"
+                placeholder="مثال: مجاني 100% أو عرض 299 ج.م"
+                className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm focus:border-[#5C1422] focus:outline-none"
               />
             </div>
             <div className="sm:col-span-2">
@@ -408,7 +415,7 @@ export function AdminPrizesTab({
                 value={editing.description || ''}
                 onChange={(e) => setEditing({ ...editing, description: e.target.value })}
                 placeholder="ملخص واضح للجائزة يظهر للعميل..."
-                className="w-full rounded-xl border border-slate-300 px-3.5 py-2 text-sm focus:border-teal-700 focus:outline-none"
+                className="w-full rounded-xl border border-slate-300 px-3.5 py-2 text-sm focus:border-[#5C1422] focus:outline-none"
               />
             </div>
             <div className="sm:col-span-2">
@@ -419,8 +426,8 @@ export function AdminPrizesTab({
                 rows={4}
                 value={editing.terms || ''}
                 onChange={(e) => setEditing({ ...editing, terms: e.target.value })}
-                placeholder="اكتب كل شرط في سطر (مثال: نطاق العرض، الصيام المطلوب، مدة الصلاحية، طريقة الصرف بالمعمل). إذا تركته فارغاً سيتم توليد الشروط المناسبة تلقائياً."
-                className="w-full rounded-xl border border-slate-300 px-3.5 py-2 text-xs leading-relaxed focus:border-teal-700 focus:outline-none"
+                placeholder="اكتب كل شرط في سطر (مثال: نطاق العرض، الصيام المطلوب، مدة الصلاحية، طريقة الصرف بالمعمل)."
+                className="w-full rounded-xl border border-slate-300 px-3.5 py-2 text-xs leading-relaxed focus:border-[#5C1422] focus:outline-none"
               />
             </div>
             <div>
@@ -428,10 +435,11 @@ export function AdminPrizesTab({
               <select
                 value={normalizePrizeCategory((editing.category || 'DISCOUNT') as PrizeCategory)}
                 onChange={(e) => setEditing({ ...editing, category: e.target.value as PrizeCategory })}
-                className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm font-bold focus:border-teal-700 focus:outline-none"
+                className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-sm font-bold focus:border-[#5C1422] focus:outline-none"
               >
                 <option value="DISCOUNT">DISCOUNT — خصومات</option>
                 <option value="FREE_SERVICE">FREE_SERVICE — تحاليل وفحوصات وزيارات</option>
+                <option value="PAID_OFFER">PAID_OFFER — عروض وباقات مدفوعة خاصة</option>
                 <option value="PHYSICAL_GIFT">PHYSICAL_GIFT — هدايا مادية</option>
                 <option value="SURPRISE">SURPRISE — مفاجآت والسحب</option>
               </select>
@@ -448,7 +456,7 @@ export function AdminPrizesTab({
                   required
                   value={editing.validHours ?? 72}
                   onChange={(e) => setEditing({ ...editing, validHours: Number(e.target.value) || 24 })}
-                  className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-center font-mono text-sm font-bold focus:border-teal-700 focus:outline-none"
+                  className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-center font-mono text-sm font-bold focus:border-[#5C1422] focus:outline-none"
                 />
                 <div className="flex shrink-0 gap-1">
                   {[24, 48, 72, 168].map((h) => (
@@ -472,7 +480,7 @@ export function AdminPrizesTab({
                 max={1000}
                 value={editing.weight ?? 20}
                 onChange={(e) => setEditing({ ...editing, weight: Number(e.target.value) || 10 })}
-                className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-center font-mono text-sm focus:border-teal-700 focus:outline-none"
+                className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-center font-mono text-sm focus:border-[#5C1422] focus:outline-none"
               />
             </div>
             <div>
@@ -483,7 +491,39 @@ export function AdminPrizesTab({
                 max={100000}
                 value={editing.stock ?? 50}
                 onChange={(e) => setEditing({ ...editing, stock: Number(e.target.value) || 10 })}
-                className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-center font-mono text-sm focus:border-teal-700 focus:outline-none"
+                className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-center font-mono text-sm focus:border-[#5C1422] focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-bold text-slate-700">التكلفة التقديرية (ج.م - اختياري)</label>
+              <input
+                type="number"
+                min={0}
+                value={editing.estimatedCostEgp ?? ''}
+                onChange={(e) =>
+                  setEditing({
+                    ...editing,
+                    estimatedCostEgp: e.target.value ? Number(e.target.value) : undefined,
+                  })
+                }
+                placeholder="مثال: 90"
+                className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-center font-mono text-sm focus:border-[#5C1422] focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-bold text-slate-700">سعر الباقة المعلن (للعروض المدفوعة)</label>
+              <input
+                type="number"
+                min={0}
+                value={editing.offerPriceEgp ?? ''}
+                onChange={(e) =>
+                  setEditing({
+                    ...editing,
+                    offerPriceEgp: e.target.value ? Number(e.target.value) : undefined,
+                  })
+                }
+                placeholder="مثال: 299"
+                className="w-full rounded-xl border border-slate-300 px-3.5 py-2.5 text-center font-mono text-sm focus:border-[#5C1422] focus:outline-none"
               />
             </div>
           </div>
@@ -499,7 +539,7 @@ export function AdminPrizesTab({
             <button
               type="submit"
               disabled={saving}
-              className="inline-flex min-h-[42px] items-center gap-1.5 rounded-xl bg-teal-700 px-5 py-2 text-xs font-extrabold text-white hover:bg-teal-800 cursor-pointer"
+              className="inline-flex min-h-[42px] items-center gap-1.5 rounded-xl bg-[#5C1422] px-5 py-2 text-xs font-extrabold text-white hover:bg-[#7A1C2E] cursor-pointer"
             >
               <Save className="h-4 w-4" />
               <span>{saving ? 'جاري الحفظ...' : 'حفظ الجائزة'}</span>
@@ -516,8 +556,9 @@ export function AdminPrizesTab({
               { id: 'ALL', label: `الكل (${countsByCategory.ALL})` },
               { id: 'DISCOUNT', label: `DISCOUNT · خصومات (${countsByCategory.DISCOUNT})` },
               { id: 'FREE_SERVICE', label: `FREE_SERVICE · تحاليل وزيارات (${countsByCategory.FREE_SERVICE})` },
+              { id: 'PAID_OFFER', label: `PAID_OFFER · عروض مدفوعة (${countsByCategory.PAID_OFFER})` },
               { id: 'PHYSICAL_GIFT', label: `PHYSICAL_GIFT · هدايا مادية (${countsByCategory.PHYSICAL_GIFT})` },
-              { id: 'SURPRISE', label: `SURPRISE · مفاجآت والسحب (${countsByCategory.SURPRISE})` },
+              { id: 'SURPRISE', label: `SURPRISE · مفاجآت VIP (${countsByCategory.SURPRISE})` },
             ] as const
           ).map((f) => (
             <button
@@ -526,7 +567,7 @@ export function AdminPrizesTab({
               onClick={() => setCategoryFilter(f.id)}
               className={`rounded-xl px-3 py-2 text-xs font-bold transition-colors whitespace-nowrap cursor-pointer ${
                 categoryFilter === f.id
-                  ? 'bg-teal-700 text-white'
+                  ? 'bg-[#5C1422] text-white'
                   : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
               }`}
             >
@@ -543,7 +584,7 @@ export function AdminPrizesTab({
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="ابحث باسم الجائزة..."
-              className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2 pr-9 pl-3 text-xs text-slate-900 focus:border-teal-700 focus:bg-white focus:outline-none"
+              className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2 pr-9 pl-3 text-xs text-slate-900 focus:border-[#5C1422] focus:bg-white focus:outline-none"
             />
           </div>
           <div className="flex items-center gap-2 shrink-0">
@@ -591,15 +632,15 @@ export function AdminPrizesTab({
                   </span>
                 </div>
 
-                <div className="flex items-center gap-2 text-xs font-bold text-amber-700 pt-1">
+                <div className="flex items-center gap-2 pt-1 text-xs font-bold text-[#B8860B]">
                   <Gift className="h-3.5 w-3.5 shrink-0" />
                   <span>{p.discountLabel}</span>
                 </div>
                 <h3 className="text-base font-extrabold text-slate-900">{p.title}</h3>
                 <p className="text-xs leading-relaxed text-slate-600">{p.description}</p>
                 {p.terms ? (
-                  <div className="rounded-xl border border-slate-100 bg-slate-50/80 p-2.5 text-[11px] leading-relaxed text-slate-600">
-                    <span className="font-extrabold text-slate-700">الشروط المعروضة للعميل: </span>
+                  <div className="rounded-xl border border-slate-100 bg-[#FAF7F4] p-2.5 text-[11px] leading-relaxed text-slate-600">
+                    <span className="font-extrabold text-[#5C1422]">الشروط المعروضة للعميل: </span>
                     <span className="line-clamp-2 whitespace-pre-line">{p.terms}</span>
                   </div>
                 ) : null}
@@ -608,7 +649,7 @@ export function AdminPrizesTab({
               <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-3 text-xs text-slate-500">
                 <div className="flex flex-wrap items-center gap-2 tabular-nums">
                   <span className="inline-flex items-center gap-1 font-semibold text-slate-700">
-                    <Clock className="h-3.5 w-3.5 text-teal-700" />
+                    <Clock className="h-3.5 w-3.5 text-[#5C1422]" />
                     <span>{formatDuration(p.validHours)}</span>
                   </span>
                   <span aria-hidden="true">·</span>

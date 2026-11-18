@@ -14,24 +14,53 @@ import {
   where,
   writeBatch,
 } from 'firebase/firestore';
-import { buildDefaultPrizeTerms, DEFAULT_PRIZES } from '../data/defaultPrizes';
+import {
+  buildDefaultPrizeTerms,
+  DEFAULT_PRIZES,
+  resolvePrizeDistributionTier,
+} from '../data/defaultPrizes';
 import { INITIAL_PRICES } from '../data/initialPrices';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import { hashPhoneNumber, normalizeCanonicalPhone } from '../utils/phoneHash';
 import { formatWhatsAppPhone } from '../utils/whatsapp';
+import {
+  enqueueOfflineMutation,
+  loadCachedBox,
+  loadCachedDashboard,
+  loadCachedPrizes,
+  loadCachedPublicProfile,
+  loadOfflineQueue,
+  saveCachedBox,
+  saveCachedDashboard,
+  saveCachedPrizes,
+  saveCachedPublicProfile,
+  saveOfflineQueue,
+} from './offlineStore';
 import type {
   AdminDashboardData,
   BoxPublicResponse,
+  DistributionTargets,
   FullBackupPayload,
+  GameMode,
   GiftLink,
   LabPriceItem,
   LabProfile,
   LinkStatus,
+  LoyaltyTier,
   Prize,
   PrizeCategory,
 } from '../types';
 
 const DEFAULT_ASSET_LOGO = `${import.meta.env.BASE_URL || '/'}logo.jpg`;
+
+export const DEFAULT_DISTRIBUTION_TARGETS: DistributionTargets = {
+  discMid: 35,
+  discHigh: 25,
+  paidOffer: 20,
+  freeGift: 12,
+  grandPrize: 5,
+  vipSurprise: 3,
+};
 
 export const DEFAULT_LAB_PROFILE: LabProfile = {
   labName: 'معامل RT للتحاليل التشخيصية',
@@ -55,6 +84,9 @@ export const DEFAULT_LAB_PROFILE: LabProfile = {
   whatsappPatientClaimTemplate:
     'مرحباً {labName}، فتحت صندوق السعادة وكسبت الجائزة التالية:\nالاسم: {clientName}\nالجائزة: {prizeTitle} ({discountLabel})\nكود الجائزة: {prizeCode}\nالفرع: {branchName}\nصالحة حتى: {expiresAt}\n\n📋 شروط الجائزة وضوابط الاستفادة الكاملة:\n{prizeTerms}\n\nأرغب في تأكيد تفعيل الجائزة وحجز الموعد.',
   shareBaseUrl: 'https://ramimokhtar228-maker.github.io/rt-lab-gift-box',
+  defaultGameMode: 'box',
+  activeCampaign: 'حملة صندوق الفرحة الدائمة',
+  distributionTargets: DEFAULT_DISTRIBUTION_TARGETS,
 };
 
 export { DEFAULT_PRIZES };
@@ -65,6 +97,7 @@ interface DecodedBoxPayload {
   b?: string;
   v?: string;
   e?: string;
+  gm?: GameMode;
   ln?: string;
   wa?: string;
   ht?: string;
@@ -131,7 +164,6 @@ function addDeletedTokensLocally(tokens: string[]): void {
       window.localStorage.removeItem(`rt_hb_won_${tok}`);
     }
 
-    // Scrub deleted tokens from any legacy/backup caches stored in localStorage
     const deletedSet = new Set(cleanList);
     for (let i = 0; i < window.localStorage.length; i++) {
       const key = window.localStorage.key(i);
@@ -162,12 +194,12 @@ function addDeletedTokensLocally(tokens: string[]): void {
             }
           }
         } catch {
-          // ignore non-JSON entries
+          // ignore
         }
       }
     }
   } catch {
-    // ignore storage errors
+    // ignore
   }
 }
 
@@ -184,10 +216,49 @@ function timestampToIso(val: unknown): string {
   if (!val) return new Date().toISOString();
   if (val instanceof Timestamp) return val.toDate().toISOString();
   if (typeof val === 'string') return val;
-  if (typeof val === 'object' && val !== null && 'toDate' in val && typeof (val as { toDate: () => Date }).toDate === 'function') {
+  if (
+    typeof val === 'object' &&
+    val !== null &&
+    'toDate' in val &&
+    typeof (val as { toDate: () => Date }).toDate === 'function'
+  ) {
     return (val as { toDate: () => Date }).toDate().toISOString();
   }
   return new Date().toISOString();
+}
+
+function parseDistributionTargets(raw: unknown): DistributionTargets {
+  if (!raw || typeof raw !== 'object') return DEFAULT_DISTRIBUTION_TARGETS;
+  const r = raw as Record<string, unknown>;
+  return {
+    discMid: Number(r.discMid ?? DEFAULT_DISTRIBUTION_TARGETS.discMid),
+    discHigh: Number(r.discHigh ?? DEFAULT_DISTRIBUTION_TARGETS.discHigh),
+    paidOffer: Number(r.paidOffer ?? DEFAULT_DISTRIBUTION_TARGETS.paidOffer),
+    freeGift: Number(r.freeGift ?? DEFAULT_DISTRIBUTION_TARGETS.freeGift),
+    grandPrize: Number(r.grandPrize ?? DEFAULT_DISTRIBUTION_TARGETS.grandPrize),
+    vipSurprise: Number(r.vipSurprise ?? DEFAULT_DISTRIBUTION_TARGETS.vipSurprise),
+  };
+}
+
+function normalizeGameMode(raw: unknown): GameMode {
+  const s = String(raw || 'box');
+  if (
+    s === 'box' ||
+    s === 'three_boxes' ||
+    s === 'wheel' ||
+    s === 'scratch' ||
+    s === 'secret' ||
+    s === 'seasonal'
+  ) {
+    return s;
+  }
+  return 'box';
+}
+
+function normalizeLoyaltyTier(raw: unknown): LoyaltyTier {
+  const s = String(raw || 'Basic');
+  if (s === 'Plus' || s === 'VIP' || s === 'Basic') return s;
+  return 'Basic';
 }
 
 function docToGiftLink(id: string, data: Record<string, unknown>, clientPhone = ''): GiftLink {
@@ -207,11 +278,23 @@ function docToGiftLink(id: string, data: Record<string, unknown>, clientPhone = 
     branchName: String(data.branchName || ''),
     phoneHash: data.phoneHash ? String(data.phoneHash) : null,
     status: isExpired ? 'expired' : rawStatus,
+    gameMode: data.gameMode ? normalizeGameMode(data.gameMode) : 'box',
+    selectedGameBox: typeof data.selectedGameBox === 'number' ? data.selectedGameBox : null,
+    campaignName: data.campaignName ? String(data.campaignName) : null,
+    loyaltyTier: normalizeLoyaltyTier(data.loyaltyTier),
+    loyaltyPoints: typeof data.loyaltyPoints === 'number' ? data.loyaltyPoints : 50,
+    referralCode: data.referralCode ? String(data.referralCode) : `RTREF-${id.slice(-5)}`,
+    referredBy: data.referredBy ? String(data.referredBy) : null,
+    isBirthdayGift: Boolean(data.isBirthdayGift),
     createdAt: timestampToIso(data.createdAt),
     expiresAt,
     openedAt: data.openedAt ? String(data.openedAt) : null,
     redeemedAt: data.redeemedAt ? String(data.redeemedAt) : null,
     redeemedBy: data.redeemedBy ? String(data.redeemedBy) : null,
+    cancelledAt: data.cancelledAt ? String(data.cancelledAt) : null,
+    cancelledBy: data.cancelledBy ? String(data.cancelledBy) : null,
+    invoiceAmount: typeof data.invoiceAmount === 'number' ? data.invoiceAmount : null,
+    rewardCost: typeof data.rewardCost === 'number' ? data.rewardCost : null,
     appointmentAt: data.appointmentAt ? String(data.appointmentAt) : null,
     appointmentNote: data.appointmentNote ? String(data.appointmentNote) : null,
     prizeId: data.prizeId ? String(data.prizeId) : null,
@@ -225,36 +308,62 @@ function docToGiftLink(id: string, data: Record<string, unknown>, clientPhone = 
   };
 }
 
+function buildWheelLabels(committedLabel?: string | null): string[] {
+  const pool = [
+    'خصم 30%',
+    'خصم 50%',
+    'تحليل مجاني',
+    'عرض 299 ج.م',
+    'زيارة مجانية',
+    'مفاجأة VIP',
+  ];
+  const first = (committedLabel || pool[0]).trim();
+  const rest = pool.filter((l) => l !== first).slice(0, 5);
+  return [first, ...rest];
+}
+
 function toPublicBox(lnk: GiftLink): BoxPublicResponse {
+  const canRevealPrize = lnk.status === 'opened' || lnk.status === 'redeemed';
   return {
     token: lnk.token,
     clientName: lnk.clientName,
     visitRef: lnk.visitRef,
     branchName: lnk.branchName,
     status: lnk.status,
+    gameMode: lnk.gameMode || 'box',
+    selectedGameBox: lnk.selectedGameBox ?? null,
+    campaignName: lnk.campaignName ?? null,
+    loyaltyTier: lnk.loyaltyTier || 'Basic',
+    loyaltyPoints: lnk.loyaltyPoints ?? 50,
+    referralCode: lnk.referralCode || `RTREF-${lnk.token.slice(-5)}`,
+    isBirthdayGift: Boolean(lnk.isBirthdayGift),
     createdAt: lnk.createdAt,
     expiresAt: lnk.expiresAt,
     openedAt: lnk.openedAt,
     redeemedAt: lnk.redeemedAt,
+    cancelledAt: lnk.cancelledAt ?? null,
     appointmentAt: lnk.appointmentAt ?? null,
     appointmentNote: lnk.appointmentNote ?? null,
-    prize: lnk.prizeTitle
-      ? {
-          title: lnk.prizeTitle,
-          description: lnk.prizeDescription || '',
-          terms: lnk.prizeTerms || undefined,
-          discountLabel: lnk.prizeDiscountLabel || 'هدية خاصة',
-          category: (lnk.prizeCategory || 'discount') as PrizeCategory,
-          prizeCode: lnk.prizeCode || '',
-          validHours: lnk.validHours || 48,
-        }
-      : null,
+    wheelLabels: buildWheelLabels(lnk.prizeDiscountLabel),
+    prize:
+      canRevealPrize && lnk.prizeTitle
+        ? {
+            title: lnk.prizeTitle,
+            description: lnk.prizeDescription || '',
+            terms: lnk.prizeTerms || undefined,
+            discountLabel: lnk.prizeDiscountLabel || 'هدية خاصة',
+            category: (lnk.prizeCategory || 'discount') as PrizeCategory,
+            prizeCode: lnk.prizeCode || '',
+            validHours: lnk.validHours || 48,
+          }
+        : null,
   };
 }
 
 function pickWeightedPrize(prizes: Prize[]): Prize {
-  const active = prizes.filter((p) => p.active);
-  const pool = active.length > 0 ? active : DEFAULT_PRIZES;
+  const active = prizes.filter((p) => p.active && (p.stock <= 0 || p.usedCount < p.stock));
+  const fallbackActive = prizes.filter((p) => p.active);
+  const pool = active.length > 0 ? active : fallbackActive.length > 0 ? fallbackActive : DEFAULT_PRIZES;
   const totalW = pool.reduce((s, p) => s + Math.max(1, p.weight), 0);
   let r = Math.random() * totalW;
   for (const p of pool) {
@@ -264,37 +373,147 @@ function pickWeightedPrize(prizes: Prize[]): Prize {
   return pool[0];
 }
 
-async function fetchActivePrizes(encodedData?: string | null): Promise<Prize[]> {
-  try {
-    const q = query(collection(db, 'prizes'), where('active', '==', true));
-    const snap = await getDocs(q);
-    if (!snap.empty) {
-      return snap.docs.map((d) => {
-        const data = d.data();
-        const title = String(data.title || '');
-        const category = (data.category as PrizeCategory) || 'DISCOUNT';
-        const validHours = Number(data.validHours || 48);
-        const defaultMatch = DEFAULT_PRIZES.find((p) => p.id === d.id || p.title === title);
-        const terms = data.terms
-          ? String(data.terms)
-          : defaultMatch?.terms || buildDefaultPrizeTerms({ title, category, validHours });
-        return {
-          id: d.id,
-          title,
-          description: String(data.description || ''),
-          terms,
-          discountLabel: String(data.discountLabel || 'هدية خاصة'),
-          category,
-          validHours,
-          weight: Number(data.weight || 20),
-          stock: Number(data.stock || 50),
-          usedCount: Number(data.usedCount || 0),
-          active: Boolean(data.active),
-        };
-      });
+function estimateRewardCost(category: PrizeCategory | null, title: string, invoice?: number | null): number {
+  const t = title.toLowerCase();
+  if (category === 'PAID_OFFER') return 90;
+  if (category === 'DISCOUNT' || category === 'discount') {
+    const pct = Number((t.match(/(\d+)\s*%/) || [])[1] || 25);
+    const baseInvoice = invoice && invoice > 0 ? invoice : 450;
+    return Math.round((baseInvoice * Math.min(80, pct)) / 100);
+  }
+  if (t.includes('500')) return 500;
+  if (t.includes('200')) return 200;
+  if (t.includes('100')) return 100;
+  if (t.includes('999')) return 320;
+  if (t.includes('555')) return 190;
+  if (t.includes('399')) return 140;
+  if (category === 'PHYSICAL_GIFT' || category === 'gift') return 120;
+  if (category === 'SURPRISE') return 85;
+  return 95;
+}
+
+function computeDashboardStats(
+  giftLinks: GiftLink[],
+  enrichedPrizes: Prize[],
+  prices: LabPriceItem[]
+): AdminDashboardData['stats'] {
+  const totalLinks = giftLinks.length;
+  const pendingLinks = giftLinks.filter((l) => l.status === 'pending').length;
+  const openedLinks = giftLinks.filter((l) => l.status === 'opened').length;
+  const redeemedLinks = giftLinks.filter((l) => l.status === 'redeemed').length;
+  const expiredLinks = giftLinks.filter((l) => l.status === 'expired').length;
+  const cancelledLinks = giftLinks.filter((l) => l.status === 'cancelled').length;
+  const activePrizes = enrichedPrizes.filter((p) => p.active).length;
+  const totalPrices = prices.filter((p) => p.active).length;
+
+  const openedOrRedeemed = giftLinks.filter(
+    (l) => l.status === 'opened' || l.status === 'redeemed' || Boolean(l.openedAt)
+  ).length;
+  const openRatePct = totalLinks > 0 ? Math.round((openedOrRedeemed / totalLinks) * 100) : 0;
+  const redemptionRatePct =
+    openedOrRedeemed > 0 ? Math.round((redeemedLinks / openedOrRedeemed) * 100) : 0;
+
+  // Returning / Loyalty clients percentage (repeated phones or Plus/VIP tiers)
+  const phoneCounts = new Map<string, number>();
+  let repeatOrLoyaltyCount = 0;
+  for (const l of giftLinks) {
+    const key = l.phoneHash || normalizeCanonicalPhone(l.clientPhone || '');
+    if (key) phoneCounts.set(key, (phoneCounts.get(key) || 0) + 1);
+  }
+  for (const l of giftLinks) {
+    const key = l.phoneHash || normalizeCanonicalPhone(l.clientPhone || '');
+    const visits = key ? phoneCounts.get(key) || 1 : 1;
+    if (visits > 1 || l.loyaltyTier === 'Plus' || l.loyaltyTier === 'VIP' || l.referredBy) {
+      repeatOrLoyaltyCount += 1;
     }
-  } catch (err) {
-    console.warn('Fallback to default prizes:', err);
+  }
+  const returningClientsPct =
+    totalLinks > 0 ? Math.round((repeatOrLoyaltyCount / totalLinks) * 100) : 0;
+
+  // Financial ROI metrics (Slide 9)
+  const redeemedList = giftLinks.filter((l) => l.status === 'redeemed');
+  let totalRevenueEgp = 0;
+  let totalRewardCostEgp = 0;
+  for (const l of redeemedList) {
+    const inv = typeof l.invoiceAmount === 'number' && l.invoiceAmount > 0 ? l.invoiceAmount : 520;
+    const cost =
+      typeof l.rewardCost === 'number' && l.rewardCost >= 0
+        ? l.rewardCost
+        : estimateRewardCost(l.prizeCategory, l.prizeTitle || '', inv);
+    totalRevenueEgp += inv;
+    totalRewardCostEgp += cost;
+  }
+  const avgInvoiceEgp = redeemedList.length > 0 ? Math.round(totalRevenueEgp / redeemedList.length) : 0;
+  const contributionMarginEgp = Math.max(0, Math.round(totalRevenueEgp - totalRewardCostEgp));
+
+  return {
+    totalLinks,
+    pendingLinks,
+    openedLinks,
+    redeemedLinks,
+    expiredLinks,
+    cancelledLinks,
+    activePrizes,
+    totalPrices,
+    openRatePct,
+    redemptionRatePct,
+    returningClientsPct,
+    avgInvoiceEgp,
+    totalRevenueEgp: Math.round(totalRevenueEgp),
+    totalRewardCostEgp: Math.round(totalRewardCostEgp),
+    contributionMarginEgp,
+  };
+}
+
+async function fetchActivePrizes(encodedData?: string | null): Promise<Prize[]> {
+  if (typeof navigator === 'undefined' || navigator.onLine) {
+    try {
+      const q = query(collection(db, 'prizes'), where('active', '==', true));
+      const snap = await getDocs(q);
+      if (!snap.empty) {
+        const loaded = snap.docs.map((d) => {
+          const data = d.data();
+          const title = String(data.title || '');
+          const category = (data.category as PrizeCategory) || 'DISCOUNT';
+          const validHours = Number(data.validHours || 48);
+          const defaultMatch = DEFAULT_PRIZES.find((p) => p.id === d.id || p.title === title);
+          const terms = data.terms
+            ? String(data.terms)
+            : defaultMatch?.terms || buildDefaultPrizeTerms({ title, category, validHours });
+          return {
+            id: d.id,
+            title,
+            description: String(data.description || ''),
+            terms,
+            discountLabel: String(data.discountLabel || 'هدية خاصة'),
+            category,
+            distributionTier: resolvePrizeDistributionTier({
+              category,
+              title,
+              discountLabel: String(data.discountLabel || ''),
+              distributionTier: data.distributionTier as Prize['distributionTier'],
+            }),
+            estimatedCostEgp:
+              typeof data.estimatedCostEgp === 'number' ? data.estimatedCostEgp : undefined,
+            offerPriceEgp: typeof data.offerPriceEgp === 'number' ? data.offerPriceEgp : undefined,
+            validHours,
+            weight: Number(data.weight || 20),
+            stock: Number(data.stock || 50),
+            usedCount: Number(data.usedCount || 0),
+            active: Boolean(data.active),
+          };
+        });
+        saveCachedPrizes(loaded);
+        return loaded;
+      }
+    } catch (err) {
+      console.warn('Fallback to cached/default prizes:', err);
+    }
+  }
+
+  const cached = loadCachedPrizes();
+  if (cached && cached.length > 0) {
+    return cached.filter((p) => p.active);
   }
 
   const decoded = decodeBoxData(encodedData);
@@ -334,6 +553,7 @@ function buildPublicProfilePayload(profile: LabProfile) {
   const normalizedWa =
     formatWhatsAppPhone(profile.whatsappNumber || '') ||
     String(profile.whatsappNumber || DEFAULT_LAB_PROFILE.whatsappNumber).trim();
+  const targets = parseDistributionTargets(profile.distributionTargets);
   return {
     labName: String(profile.labName || DEFAULT_LAB_PROFILE.labName).slice(0, 120),
     tagline: String(profile.tagline || '').slice(0, 200),
@@ -348,6 +568,9 @@ function buildPublicProfilePayload(profile: LabProfile) {
     logoUrl: String(profile.logoUrl || DEFAULT_ASSET_LOGO).slice(0, 500000),
     whatsappPatientClaimTemplate: String(profile.whatsappPatientClaimTemplate || '').slice(0, 2000),
     shareBaseUrl: String(profile.shareBaseUrl || '').slice(0, 300),
+    defaultGameMode: normalizeGameMode(profile.defaultGameMode),
+    activeCampaign: String(profile.activeCampaign || DEFAULT_LAB_PROFILE.activeCampaign || '').slice(0, 120),
+    distributionTargets: targets,
     updatedAt: serverTimestamp(),
   };
 }
@@ -375,48 +598,168 @@ function mergePricesWithInitial(overrides: LabPriceItem[]): LabPriceItem[] {
   return Array.from(map.values());
 }
 
+function applyProfileFields(d: Record<string, unknown>, base: LabProfile): LabProfile {
+  const serverWa = String(d.whatsappNumber || '').trim();
+  const normalizedServerWa = serverWa ? formatWhatsAppPhone(serverWa) || serverWa : '';
+  const resolvedWa =
+    !normalizedServerWa || normalizedServerWa === '201100874444'
+      ? base.whatsappNumber
+      : normalizedServerWa;
+  const serverClaimTpl = String(d.whatsappPatientClaimTemplate ?? base.whatsappPatientClaimTemplate);
+  return {
+    ...base,
+    labName: String(d.labName || base.labName),
+    tagline: String(d.tagline ?? base.tagline),
+    director: String(d.director ?? base.director),
+    hotlineNumber: String(d.hotlineNumber ?? base.hotlineNumber),
+    whatsappNumber: resolvedWa,
+    address: String(d.address ?? base.address),
+    workingHours: String(d.workingHours ?? base.workingHours),
+    branches: Array.isArray(d.branches) ? d.branches.map(String) : base.branches,
+    logoUrl: String(d.logoUrl || base.logoUrl),
+    whatsappPatientClaimTemplate: serverClaimTpl.includes('{prizeTerms}')
+      ? serverClaimTpl
+      : DEFAULT_LAB_PROFILE.whatsappPatientClaimTemplate,
+    shareBaseUrl: String(d.shareBaseUrl ?? base.shareBaseUrl ?? ''),
+    defaultGameMode: d.defaultGameMode ? normalizeGameMode(d.defaultGameMode) : base.defaultGameMode,
+    activeCampaign: d.activeCampaign ? String(d.activeCampaign) : base.activeCampaign,
+    distributionTargets: d.distributionTargets
+      ? parseDistributionTargets(d.distributionTargets)
+      : base.distributionTargets,
+  };
+}
+
+export function getOfflineQueueCount(): number {
+  return loadOfflineQueue().length;
+}
+
+export async function syncOfflineQueue(): Promise<number> {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) return 0;
+  const queue = loadOfflineQueue();
+  if (queue.length === 0) return 0;
+
+  const remaining = [...queue];
+  let synced = 0;
+
+  for (const item of queue) {
+    try {
+      if (item.type === 'create_link') {
+        const lnk = item.payload.link as GiftLink;
+        if (lnk?.token) {
+          const existing = await getDoc(doc(db, 'giftLinks', lnk.token));
+          if (!existing.exists()) {
+            const batch = writeBatch(db);
+            batch.set(doc(db, 'giftLinks', lnk.token), {
+              id: lnk.token,
+              token: lnk.token,
+              clientName: lnk.clientName.slice(0, 120),
+              visitRef: lnk.visitRef.slice(0, 64),
+              branchName: lnk.branchName.slice(0, 160),
+              ...(lnk.phoneHash ? { phoneHash: lnk.phoneHash } : {}),
+              status: lnk.status || 'pending',
+              gameMode: lnk.gameMode || 'box',
+              campaignName: lnk.campaignName || null,
+              loyaltyTier: lnk.loyaltyTier || 'Basic',
+              loyaltyPoints: lnk.loyaltyPoints ?? 50,
+              referralCode: lnk.referralCode || null,
+              referredBy: lnk.referredBy || null,
+              isBirthdayGift: Boolean(lnk.isBirthdayGift),
+              createdAt: serverTimestamp(),
+              expiresAt: lnk.expiresAt,
+              openedAt: lnk.openedAt,
+              redeemedAt: lnk.redeemedAt,
+              redeemedBy: lnk.redeemedBy,
+              appointmentAt: lnk.appointmentAt || null,
+              appointmentNote: lnk.appointmentNote || null,
+              prizeId: lnk.prizeId,
+              prizeTitle: lnk.prizeTitle,
+              prizeDescription: lnk.prizeDescription,
+              prizeTerms: lnk.prizeTerms || null,
+              prizeDiscountLabel: lnk.prizeDiscountLabel,
+              prizeCategory: lnk.prizeCategory,
+              prizeCode: lnk.prizeCode,
+              validHours: lnk.validHours,
+              updatedAt: serverTimestamp(),
+            });
+            batch.set(doc(db, 'giftLinks', lnk.token, 'private', 'contact'), {
+              clientPhone: lnk.clientPhone || '',
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            });
+            await batch.commit();
+          }
+        }
+      } else if (item.type === 'open_box') {
+        const box = item.payload.box as BoxPublicResponse;
+        const phone = String(item.payload.clientPhone || '');
+        if (box?.token) {
+          await apiClient.syncCachedBoxToCloud(box, phone);
+        }
+      } else if (item.type === 'redeem_code') {
+        const code = String(item.payload.code || '');
+        const staffName = String(item.payload.staffName || 'استقبال المعمل');
+        const invoiceAmount =
+          typeof item.payload.invoiceAmount === 'number' ? item.payload.invoiceAmount : undefined;
+        const rewardCost =
+          typeof item.payload.rewardCost === 'number' ? item.payload.rewardCost : undefined;
+        if (code) {
+          await apiClient.redeemPrize(code, staffName, { invoiceAmount, rewardCost });
+        }
+      } else if (item.type === 'cancel_link') {
+        const id = String(item.payload.id || '');
+        const staffName = String(item.payload.staffName || 'إدارة المعمل');
+        if (id) {
+          await apiClient.cancelGiftLink(id, staffName);
+        }
+      } else if (item.type === 'update_appointment') {
+        const id = String(item.payload.id || '');
+        const appointmentAt = String(item.payload.appointmentAt || '');
+        const appointmentNote = String(item.payload.appointmentNote || '');
+        if (id) {
+          await apiClient.updateAppointment(id, appointmentAt, appointmentNote);
+        }
+      }
+      remaining.shift();
+      synced++;
+    } catch (err) {
+      console.warn('Paused offline queue sync on item:', item.type, err);
+      break;
+    }
+  }
+
+  saveOfflineQueue(remaining);
+  return synced;
+}
+
 export const apiClient = {
+  getCachedDashboard(): AdminDashboardData | null {
+    return loadCachedDashboard();
+  },
+
   async getPublicConfig(encodedData?: string | null): Promise<{ labProfile: LabProfile; shareBaseUrl: string }> {
-    const profile: LabProfile = { ...DEFAULT_LAB_PROFILE };
+    const cached = loadCachedPublicProfile();
+    let profile: LabProfile = cached ? { ...DEFAULT_LAB_PROFILE, ...cached } : { ...DEFAULT_LAB_PROFILE };
     let hasServerProfile = false;
     let hasServerWhatsapp = false;
-    try {
-      let snap;
+
+    if (typeof navigator === 'undefined' || navigator.onLine) {
       try {
-        snap = await getDocFromServer(doc(db, 'publicConfig', 'labProfile'));
-      } catch {
-        snap = await getDoc(doc(db, 'publicConfig', 'labProfile'));
-      }
-      if (snap.exists()) {
-        hasServerProfile = true;
-        const d = snap.data();
-        profile.labName = String(d.labName || profile.labName);
-        profile.tagline = String(d.tagline ?? profile.tagline);
-        profile.director = String(d.director ?? profile.director);
-        profile.hotlineNumber = String(d.hotlineNumber ?? profile.hotlineNumber);
-        const serverWa = String(d.whatsappNumber || '').trim();
-        const normalizedServerWa = serverWa ? formatWhatsAppPhone(serverWa) || serverWa : '';
-        if (normalizedServerWa) {
-          profile.whatsappNumber =
-            normalizedServerWa === '201100874444'
-              ? DEFAULT_LAB_PROFILE.whatsappNumber
-              : normalizedServerWa;
-          hasServerWhatsapp = true;
+        let snap;
+        try {
+          snap = await getDocFromServer(doc(db, 'publicConfig', 'labProfile'));
+        } catch {
+          snap = await getDoc(doc(db, 'publicConfig', 'labProfile'));
         }
-        profile.address = String(d.address ?? profile.address);
-        profile.workingHours = String(d.workingHours ?? profile.workingHours);
-        profile.branches = Array.isArray(d.branches) ? d.branches.map(String) : profile.branches;
-        profile.logoUrl = String(d.logoUrl || profile.logoUrl);
-        const serverClaimTpl = String(
-          d.whatsappPatientClaimTemplate ?? profile.whatsappPatientClaimTemplate
-        );
-        profile.whatsappPatientClaimTemplate = serverClaimTpl.includes('{prizeTerms}')
-          ? serverClaimTpl
-          : DEFAULT_LAB_PROFILE.whatsappPatientClaimTemplate;
-        profile.shareBaseUrl = String(d.shareBaseUrl ?? '');
+        if (snap.exists()) {
+          hasServerProfile = true;
+          const d = snap.data();
+          if (d.whatsappNumber) hasServerWhatsapp = true;
+          profile = applyProfileFields(d, profile);
+          saveCachedPublicProfile(profile);
+        }
+      } catch (err) {
+        console.warn('Using cached/default public config:', err);
       }
-    } catch (err) {
-      console.warn('Using default public config:', err);
     }
 
     const decoded = decodeBoxData(encodedData);
@@ -428,6 +771,7 @@ export const apiClient = {
           decodedWa === '201100874444' ? DEFAULT_LAB_PROFILE.whatsappNumber : decodedWa;
       }
       if (decoded.ht && !hasServerProfile) profile.hotlineNumber = decoded.ht;
+      if (decoded.gm) profile.defaultGameMode = normalizeGameMode(decoded.gm);
     }
 
     return {
@@ -441,36 +785,12 @@ export const apiClient = {
       doc(db, 'publicConfig', 'labProfile'),
       (snap) => {
         if (!snap.exists()) return;
-        const d = snap.data();
-        const serverWa = String(d.whatsappNumber || '').trim();
-        const normalizedWa = serverWa ? formatWhatsAppPhone(serverWa) || serverWa : '';
-        const resolvedWa =
-          !normalizedWa || normalizedWa === '201100874444'
-            ? DEFAULT_LAB_PROFILE.whatsappNumber
-            : normalizedWa;
-        const serverClaimTpl = String(
-          d.whatsappPatientClaimTemplate ?? DEFAULT_LAB_PROFILE.whatsappPatientClaimTemplate
-        );
-        const profile: LabProfile = {
-          ...DEFAULT_LAB_PROFILE,
-          labName: String(d.labName || DEFAULT_LAB_PROFILE.labName),
-          tagline: String(d.tagline ?? DEFAULT_LAB_PROFILE.tagline),
-          director: String(d.director ?? DEFAULT_LAB_PROFILE.director),
-          hotlineNumber: String(d.hotlineNumber ?? DEFAULT_LAB_PROFILE.hotlineNumber),
-          whatsappNumber: resolvedWa,
-          address: String(d.address ?? DEFAULT_LAB_PROFILE.address),
-          workingHours: String(d.workingHours ?? DEFAULT_LAB_PROFILE.workingHours),
-          branches: Array.isArray(d.branches) ? d.branches.map(String) : DEFAULT_LAB_PROFILE.branches,
-          logoUrl: String(d.logoUrl || DEFAULT_ASSET_LOGO),
-          whatsappPatientClaimTemplate: serverClaimTpl.includes('{prizeTerms}')
-            ? serverClaimTpl
-            : DEFAULT_LAB_PROFILE.whatsappPatientClaimTemplate,
-          shareBaseUrl: String(d.shareBaseUrl ?? ''),
-        };
+        const profile = applyProfileFields(snap.data(), DEFAULT_LAB_PROFILE);
+        saveCachedPublicProfile(profile);
         onProfile(profile, profile.shareBaseUrl || getAppShareBase());
       },
       () => {
-        // ignore transient snapshot errors on public read
+        // ignore transient offline/public errors
       }
     );
   },
@@ -496,7 +816,7 @@ export const apiClient = {
         return { ok: false, deleted: true, message: 'تم حذف هذا السجل أو إلغاؤه من قِبل إدارة المعمل.' };
       }
     } catch {
-      // continue if deletedLinks check failed offline
+      // offline fallback continues below
     }
 
     const path = `giftLinks/${clean}`;
@@ -504,11 +824,22 @@ export const apiClient = {
       const snap = await getDoc(doc(db, 'giftLinks', clean));
       if (snap.exists()) {
         const lnk = docToGiftLink(snap.id, snap.data());
-        return { ok: true, box: toPublicBox(lnk) };
+        const box = toPublicBox(lnk);
+        if (box.status === 'opened' || box.status === 'redeemed') {
+          saveCachedBox(box);
+        }
+        return { ok: true, box };
       }
     } catch (error) {
-      handleFirestoreError(error, OperationType.GET, path);
+      const cached = loadCachedBox(clean);
+      if (cached) return { ok: true, box: cached };
+      if (typeof navigator !== 'undefined' && navigator.onLine) {
+        handleFirestoreError(error, OperationType.GET, path);
+      }
     }
+
+    const cached = loadCachedBox(clean);
+    if (cached) return { ok: true, box: cached };
 
     const decoded = decodeBoxData(encodedData);
     if (decoded || clean === 'RTBOX-DEMO2026') {
@@ -520,6 +851,7 @@ export const apiClient = {
         clientPhone: decoded?.p || '',
         visitRef: decoded?.v || `RT-${Math.floor(1000 + Math.random() * 9000)}`,
         branchName: decoded?.b || DEFAULT_LAB_PROFILE.branches[0],
+        gameMode: decoded?.gm ? normalizeGameMode(decoded.gm) : undefined,
         status: 'pending',
         createdAt: new Date(now).toISOString(),
         expiresAt:
@@ -545,7 +877,8 @@ export const apiClient = {
 
   async openBoxByToken(
     token: string,
-    encodedData?: string | null
+    encodedData?: string | null,
+    options?: { selectedGameBox?: number; gameMode?: GameMode }
   ): Promise<{ ok: boolean; alreadyClaimed?: boolean; box?: BoxPublicResponse; message?: string }> {
     const clean = normalizeId(token);
     if (!clean) {
@@ -563,15 +896,20 @@ export const apiClient = {
         return { ok: false, message: 'تم حذف هذا السجل أو إلغاؤه من قِبل إدارة المعمل.' };
       }
     } catch {
-      // continue
+      // continue offline
+    }
+
+    const cachedExisting = loadCachedBox(clean);
+    if (cachedExisting && (cachedExisting.status === 'opened' || cachedExisting.status === 'redeemed') && cachedExisting.prize) {
+      return { ok: true, box: cachedExisting };
     }
 
     const linkRef = doc(db, 'giftLinks', clean);
-    let existingSnap;
+    let existingSnap = null;
     try {
       existingSnap = await getDoc(linkRef);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.GET, `giftLinks/${clean}`);
+    } catch {
+      existingSnap = null;
     }
 
     const checkActivePhoneLock = async (phoneHash: string): Promise<{
@@ -599,17 +937,22 @@ export const apiClient = {
           return { locked: true, activeBox: toPublicBox(activeLink) };
         }
       } catch {
-        // ignore read error and allow fallback
+        // ignore offline read errors
       }
       return { locked: false };
     };
 
     const decoded = decodeBoxData(encodedData);
 
-    if (existingSnap.exists()) {
+    if (existingSnap && existingSnap.exists()) {
       const existingLnk = docToGiftLink(existingSnap.id, existingSnap.data());
       if (existingLnk.status === 'opened' || existingLnk.status === 'redeemed') {
-        return { ok: true, box: toPublicBox(existingLnk) };
+        const out = toPublicBox(existingLnk);
+        saveCachedBox(out);
+        return { ok: true, box: out };
+      }
+      if (existingLnk.status === 'cancelled') {
+        return { ok: false, message: 'تم إلغاء هذا الكود من قِبل إدارة المعمل.' };
       }
       if (existingLnk.status === 'expired') {
         return { ok: false, message: 'انتهت صلاحية هذا الرابط.' };
@@ -630,28 +973,80 @@ export const apiClient = {
         }
       }
 
-      const prizes = await fetchActivePrizes(encodedData);
-      const chosen = pickWeightedPrize(prizes);
+      // Slide 2 invariant: Reuse pre-committed prize from admin link creation if present, otherwise pick weighted
+      let prizeId = existingLnk.prizeId;
+      let prizeTitle = existingLnk.prizeTitle;
+      let prizeDescription = existingLnk.prizeDescription;
+      let prizeTerms = existingLnk.prizeTerms;
+      let prizeDiscountLabel = existingLnk.prizeDiscountLabel;
+      let prizeCategory = existingLnk.prizeCategory;
+      let prizeCode = existingLnk.prizeCode;
+      let validHours = existingLnk.validHours;
+
+      if (!prizeTitle || !prizeCode) {
+        const prizes = await fetchActivePrizes(encodedData);
+        const chosen = pickWeightedPrize(prizes);
+        prizeId = chosen.id.slice(0, 128);
+        prizeTitle = chosen.title.slice(0, 200);
+        prizeDescription = chosen.description.slice(0, 600);
+        prizeTerms = (chosen.terms || buildDefaultPrizeTerms(chosen)).slice(0, 1000);
+        prizeDiscountLabel = chosen.discountLabel.slice(0, 80);
+        prizeCategory = chosen.category;
+        prizeCode = randomCode('RTWIN-', 6);
+        validHours = Math.max(1, Number(chosen.validHours || 48));
+      }
+
       const now = Date.now();
-      const validHours = Math.max(1, Number(chosen.validHours || 48));
+      const resolvedValidHours = Math.max(1, Number(validHours || 48));
       const openedAt = new Date(now).toISOString();
-      const expiresAt = new Date(now + validHours * 3600_000).toISOString();
-      const prizeCode = randomCode('RTWIN-', 6);
-      const prizeTerms = (chosen.terms || buildDefaultPrizeTerms(chosen)).slice(0, 1000);
+      const expiresAt = new Date(now + resolvedValidHours * 3600_000).toISOString();
+      const finalTerms = (
+        prizeTerms ||
+        buildDefaultPrizeTerms({
+          title: prizeTitle,
+          category: (prizeCategory || 'DISCOUNT') as PrizeCategory,
+          validHours: resolvedValidHours,
+        })
+      ).slice(0, 1000);
+
+      const chosenMode = options?.gameMode || existingLnk.gameMode || 'box';
+
+      const updated: GiftLink = {
+        ...existingLnk,
+        status: 'opened',
+        gameMode: chosenMode,
+        selectedGameBox: options?.selectedGameBox ?? existingLnk.selectedGameBox ?? null,
+        openedAt,
+        expiresAt,
+        prizeId,
+        prizeTitle,
+        prizeDescription,
+        prizeTerms: finalTerms,
+        prizeDiscountLabel,
+        prizeCategory,
+        prizeCode,
+        validHours: resolvedValidHours,
+      };
+      const outBox = toPublicBox(updated);
+      saveCachedBox(outBox);
 
       const batch = writeBatch(db);
       batch.update(linkRef, {
         status: 'opened',
         openedAt,
         expiresAt,
-        prizeId: chosen.id.slice(0, 128),
-        prizeTitle: chosen.title.slice(0, 200),
-        prizeDescription: chosen.description.slice(0, 600),
-        prizeTerms,
-        prizeDiscountLabel: chosen.discountLabel.slice(0, 80),
-        prizeCategory: chosen.category.slice(0, 40),
-        prizeCode,
-        validHours,
+        gameMode: chosenMode,
+        ...(typeof options?.selectedGameBox === 'number'
+          ? { selectedGameBox: options.selectedGameBox }
+          : {}),
+        prizeId: String(prizeId || 'prz_pre').slice(0, 128),
+        prizeTitle: prizeTitle.slice(0, 200),
+        prizeDescription: (prizeDescription || '').slice(0, 600),
+        prizeTerms: finalTerms,
+        prizeDiscountLabel: (prizeDiscountLabel || 'هدية خاصة').slice(0, 80),
+        prizeCategory: String(prizeCategory || 'DISCOUNT').slice(0, 40),
+        prizeCode: prizeCode.slice(0, 64),
+        validHours: resolvedValidHours,
         updatedAt: serverTimestamp(),
       });
       if (phoneHash) {
@@ -659,35 +1054,24 @@ export const apiClient = {
           id: phoneHash,
           activeToken: clean,
           expiresAt,
-          lockUntil: Timestamp.fromMillis(now + validHours * 3600_000),
+          lockUntil: Timestamp.fromMillis(now + resolvedValidHours * 3600_000),
           updatedAt: serverTimestamp(),
         });
       }
 
-      try {
-        await batch.commit();
-      } catch (error) {
-        handleFirestoreError(error, OperationType.UPDATE, `giftLinks/${clean}`);
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        enqueueOfflineMutation('open_box', { box: outBox, clientPhone: decoded?.p || '' });
+        return { ok: true, box: outBox };
       }
 
-      const updated: GiftLink = {
-        ...existingLnk,
-        status: 'opened',
-        openedAt,
-        expiresAt,
-        prizeId: chosen.id,
-        prizeTitle: chosen.title,
-        prizeDescription: chosen.description,
-        prizeTerms,
-        prizeDiscountLabel: chosen.discountLabel,
-        prizeCategory: chosen.category,
-        prizeCode,
-        validHours,
-      };
-      return { ok: true, box: toPublicBox(updated) };
+      try {
+        await batch.commit();
+      } catch {
+        enqueueOfflineMutation('open_box', { box: outBox, clientPhone: decoded?.p || '' });
+      }
+      return { ok: true, box: outBox };
     }
 
-    // Hydrate legacy ?d= link or demo link into Firestore atomically so Admin sees it immediately
     if (!decoded && clean !== 'RTBOX-DEMO2026') {
       return { ok: false, message: 'رابط صندوق السعادة غير موجود.' };
     }
@@ -720,6 +1104,45 @@ export const apiClient = {
     const clientPhone = normalizeCanonicalPhone(decodedPhone) || decodedPhone;
     const visitRef = (decoded?.v || `RT-${Math.floor(1000 + Math.random() * 9000)}`).slice(0, 64);
     const branchName = (decoded?.b || DEFAULT_LAB_PROFILE.branches[0]).slice(0, 160);
+    const chosenMode = options?.gameMode || decoded?.gm || 'box';
+    const referralCode = randomCode('RTREF-', 5);
+
+    const newLink: GiftLink = {
+      id: clean,
+      token: clean,
+      clientName,
+      clientPhone,
+      visitRef,
+      branchName,
+      phoneHash: decodedPhoneHash || null,
+      status: 'opened',
+      gameMode: chosenMode,
+      selectedGameBox: options?.selectedGameBox ?? null,
+      loyaltyTier: 'Basic',
+      loyaltyPoints: 50,
+      referralCode,
+      createdAt: openedAt,
+      expiresAt,
+      openedAt,
+      redeemedAt: null,
+      redeemedBy: null,
+      prizeId: chosen.id,
+      prizeTitle: chosen.title,
+      prizeDescription: chosen.description,
+      prizeTerms,
+      prizeDiscountLabel: chosen.discountLabel,
+      prizeCategory: chosen.category,
+      prizeCode,
+      validHours,
+    };
+
+    const outBox = toPublicBox(newLink);
+    saveCachedBox(outBox);
+
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      enqueueOfflineMutation('open_box', { box: outBox, clientPhone });
+      return { ok: true, box: outBox };
+    }
 
     const batch = writeBatch(db);
     batch.set(linkRef, {
@@ -730,11 +1153,22 @@ export const apiClient = {
       branchName,
       ...(decodedPhoneHash ? { phoneHash: decodedPhoneHash } : {}),
       status: 'opened',
+      gameMode: chosenMode,
+      ...(typeof options?.selectedGameBox === 'number'
+        ? { selectedGameBox: options.selectedGameBox }
+        : {}),
+      loyaltyTier: 'Basic',
+      loyaltyPoints: 50,
+      referralCode,
       createdAt: serverTimestamp(),
       expiresAt,
       openedAt,
       redeemedAt: null,
       redeemedBy: null,
+      cancelledAt: null,
+      cancelledBy: null,
+      invoiceAmount: null,
+      rewardCost: null,
       appointmentAt: null,
       appointmentNote: null,
       prizeId: chosen.id.slice(0, 128),
@@ -764,42 +1198,21 @@ export const apiClient = {
 
     try {
       await batch.commit();
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, `giftLinks/${clean}`);
+    } catch {
+      enqueueOfflineMutation('open_box', { box: outBox, clientPhone });
     }
 
-    return {
-      ok: true,
-      box: toPublicBox({
-        id: clean,
-        token: clean,
-        clientName,
-        clientPhone,
-        visitRef,
-        branchName,
-        phoneHash: decodedPhoneHash || null,
-        status: 'opened',
-        createdAt: openedAt,
-        expiresAt,
-        openedAt,
-        redeemedAt: null,
-        redeemedBy: null,
-        prizeId: chosen.id,
-        prizeTitle: chosen.title,
-        prizeDescription: chosen.description,
-        prizeTerms,
-        prizeDiscountLabel: chosen.discountLabel,
-        prizeCategory: chosen.category,
-        prizeCode,
-        validHours,
-      }),
-    };
+    return { ok: true, box: outBox };
   },
 
   async createAndOpenSelfBox(payload: {
     clientName: string;
     clientPhone: string;
     branchName?: string;
+    gameMode?: GameMode;
+    selectedGameBox?: number;
+    referredBy?: string;
+    isBirthdayGift?: boolean;
   }): Promise<{ ok: boolean; alreadyClaimed?: boolean; box?: BoxPublicResponse; message?: string }> {
     const cleanName = payload.clientName.trim().slice(0, 120);
     const canonicalPhone = normalizeCanonicalPhone(payload.clientPhone).slice(0, 40);
@@ -808,7 +1221,7 @@ export const apiClient = {
     }
 
     const phoneHash = await hashPhoneNumber(canonicalPhone);
-    if (phoneHash) {
+    if (phoneHash && (typeof navigator === 'undefined' || navigator.onLine)) {
       try {
         const lockSnap = await getDoc(doc(db, 'phoneLocks', phoneHash));
         if (lockSnap.exists()) {
@@ -850,9 +1263,53 @@ export const apiClient = {
     const expiresAt = new Date(now + validHours * 3600_000).toISOString();
     const token = randomCode('RTBOX-', 6);
     const prizeCode = randomCode('RTWIN-', 6);
+    const referralCode = randomCode('RTREF-', 5);
     const visitRef = `RT-${Math.floor(1000 + Math.random() * 9000)}`;
     const branchName = (payload.branchName || DEFAULT_LAB_PROFILE.branches[0]).slice(0, 160);
     const prizeTerms = (chosen.terms || buildDefaultPrizeTerms(chosen)).slice(0, 1000);
+    const chosenMode = payload.gameMode || 'box';
+    const referredBy = payload.referredBy?.trim().slice(0, 40) || null;
+    const isBirthdayGift = Boolean(payload.isBirthdayGift);
+    const initialPoints = isBirthdayGift ? 100 : referredBy ? 75 : 50;
+
+    const newLink: GiftLink = {
+      id: token,
+      token,
+      clientName: cleanName,
+      clientPhone: canonicalPhone,
+      visitRef,
+      branchName,
+      phoneHash: phoneHash || null,
+      status: 'opened',
+      gameMode: chosenMode,
+      selectedGameBox: payload.selectedGameBox ?? null,
+      loyaltyTier: isBirthdayGift ? 'Plus' : 'Basic',
+      loyaltyPoints: initialPoints,
+      referralCode,
+      referredBy,
+      isBirthdayGift,
+      createdAt: openedAt,
+      expiresAt,
+      openedAt,
+      redeemedAt: null,
+      redeemedBy: null,
+      prizeId: chosen.id,
+      prizeTitle: chosen.title,
+      prizeDescription: chosen.description,
+      prizeTerms,
+      prizeDiscountLabel: chosen.discountLabel,
+      prizeCategory: chosen.category,
+      prizeCode,
+      validHours,
+    };
+
+    const outBox = toPublicBox(newLink);
+    saveCachedBox(outBox);
+
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      enqueueOfflineMutation('open_box', { box: outBox, clientPhone: canonicalPhone });
+      return { ok: true, box: outBox };
+    }
 
     const batch = writeBatch(db);
     batch.set(doc(db, 'giftLinks', token), {
@@ -863,11 +1320,24 @@ export const apiClient = {
       branchName,
       ...(phoneHash ? { phoneHash } : {}),
       status: 'opened',
+      gameMode: chosenMode,
+      ...(typeof payload.selectedGameBox === 'number'
+        ? { selectedGameBox: payload.selectedGameBox }
+        : {}),
+      loyaltyTier: isBirthdayGift ? 'Plus' : 'Basic',
+      loyaltyPoints: initialPoints,
+      referralCode,
+      ...(referredBy ? { referredBy } : {}),
+      isBirthdayGift,
       createdAt: serverTimestamp(),
       expiresAt,
       openedAt,
       redeemedAt: null,
       redeemedBy: null,
+      cancelledAt: null,
+      cancelledBy: null,
+      invoiceAmount: null,
+      rewardCost: null,
       appointmentAt: null,
       appointmentNote: null,
       prizeId: chosen.id.slice(0, 128),
@@ -897,39 +1367,15 @@ export const apiClient = {
 
     try {
       await batch.commit();
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, `giftLinks/${token}`);
+    } catch {
+      enqueueOfflineMutation('open_box', { box: outBox, clientPhone: canonicalPhone });
     }
 
-    return {
-      ok: true,
-      box: toPublicBox({
-        id: token,
-        token,
-        clientName: cleanName,
-        clientPhone: canonicalPhone,
-        visitRef,
-        branchName,
-        phoneHash: phoneHash || null,
-        status: 'opened',
-        createdAt: openedAt,
-        expiresAt,
-        openedAt,
-        redeemedAt: null,
-        redeemedBy: null,
-        prizeId: chosen.id,
-        prizeTitle: chosen.title,
-        prizeDescription: chosen.description,
-        prizeTerms,
-        prizeDiscountLabel: chosen.discountLabel,
-        prizeCategory: chosen.category,
-        prizeCode,
-        validHours,
-      }),
-    };
+    return { ok: true, box: outBox };
   },
 
   async ensureInitialSeed(): Promise<void> {
+    if (typeof navigator !== 'undefined' && !navigator.onLine) return;
     try {
       const [profileSnap, templatesSnap, prizesSnap] = await Promise.all([
         getDoc(doc(db, 'publicConfig', 'labProfile')),
@@ -951,22 +1397,11 @@ export const apiClient = {
         const needsTplUpgrade = !curTpl.includes('{prizeTerms}');
         if (needsWaUpgrade || needsTplUpgrade) {
           const upgradedProfile: LabProfile = {
-            ...DEFAULT_LAB_PROFILE,
-            labName: String(pData.labName || DEFAULT_LAB_PROFILE.labName),
-            tagline: String(pData.tagline ?? DEFAULT_LAB_PROFILE.tagline),
-            director: String(pData.director ?? DEFAULT_LAB_PROFILE.director),
-            hotlineNumber: String(pData.hotlineNumber ?? DEFAULT_LAB_PROFILE.hotlineNumber),
+            ...applyProfileFields(pData, DEFAULT_LAB_PROFILE),
             whatsappNumber: needsWaUpgrade ? DEFAULT_LAB_PROFILE.whatsappNumber : curWa,
-            address: String(pData.address ?? DEFAULT_LAB_PROFILE.address),
-            workingHours: String(pData.workingHours ?? DEFAULT_LAB_PROFILE.workingHours),
-            branches: Array.isArray(pData.branches)
-              ? pData.branches.map(String)
-              : DEFAULT_LAB_PROFILE.branches,
-            logoUrl: String(pData.logoUrl || DEFAULT_ASSET_LOGO),
             whatsappPatientClaimTemplate: needsTplUpgrade
               ? DEFAULT_LAB_PROFILE.whatsappPatientClaimTemplate
               : curTpl,
-            shareBaseUrl: String(pData.shareBaseUrl ?? DEFAULT_LAB_PROFILE.shareBaseUrl),
           };
           batch.set(doc(db, 'publicConfig', 'labProfile'), buildPublicProfilePayload(upgradedProfile));
           hasWrites = true;
@@ -1002,7 +1437,6 @@ export const apiClient = {
         }
         hasWrites = true;
       } else {
-        // Backfill missing terms on already-seeded prizes & add newly added default SURPRISE prizes if absent
         const existingIds = new Set(prizesSnap.docs.map((d) => d.id));
         for (const d of prizesSnap.docs) {
           const data = d.data();
@@ -1019,9 +1453,19 @@ export const apiClient = {
             hasWrites = true;
           }
         }
-        const newlyAddedIds = ['prz_surp_lucky_rt', 'prz_surp_dr_rami', 'prz_surp_monthly_draw'];
-        if (prizesSnap.size >= 70 && newlyAddedIds.every((nid) => !existingIds.has(nid))) {
-          for (const nid of newlyAddedIds) {
+        // Seed new Paid Offers & missing SURPRISE defaults cleanly if absent
+        const newDefaultsToAdd = [
+          'prz_surp_lucky_rt',
+          'prz_surp_dr_rami',
+          'prz_surp_monthly_draw',
+          'prz_paid_5tests_299',
+          'prz_paid_checkup_399',
+          'prz_paid_adv_555',
+          'prz_paid_5vitamins_499',
+          'prz_paid_vip_999',
+        ];
+        for (const nid of newDefaultsToAdd) {
+          if (!existingIds.has(nid)) {
             const p = DEFAULT_PRIZES.find((item) => item.id === nid);
             if (p) {
               batch.set(doc(db, 'prizes', p.id), {
@@ -1061,7 +1505,6 @@ export const apiClient = {
       };
       const prices = mergePricesWithInitial(priceOverrides);
 
-      // Compute usedCount per prize dynamically from giftLinks
       const usedMap = new Map<string, number>();
       for (const lnk of giftLinks) {
         if (lnk.prizeId) {
@@ -1073,50 +1516,38 @@ export const apiClient = {
         usedCount: Math.max(p.usedCount, usedMap.get(p.id) || 0),
       }));
 
-      onData({
+      const payload: AdminDashboardData = {
         labProfile,
         prizes: enrichedPrizes,
         giftLinks,
         prices,
-        stats: {
-          totalLinks: giftLinks.length,
-          pendingLinks: giftLinks.filter((l) => l.status === 'pending').length,
-          openedLinks: giftLinks.filter((l) => l.status === 'opened').length,
-          redeemedLinks: giftLinks.filter((l) => l.status === 'redeemed').length,
-          expiredLinks: giftLinks.filter((l) => l.status === 'expired').length,
-          activePrizes: enrichedPrizes.filter((p) => p.active).length,
-          totalPrices: prices.filter((p) => p.active).length,
-        },
-      });
+        stats: computeDashboardStats(giftLinks, enrichedPrizes, prices),
+      };
+      saveCachedDashboard(payload);
+      onData(payload);
     };
+
+    const cachedInitial = loadCachedDashboard();
+    if (cachedInitial && typeof navigator !== 'undefined' && !navigator.onLine) {
+      onData(cachedInitial);
+    }
 
     const unsubProfile = onSnapshot(
       doc(db, 'publicConfig', 'labProfile'),
       (snap) => {
         if (snap.exists()) {
-          const d = snap.data();
-          const curWa = formatWhatsAppPhone(String(d.whatsappNumber || '')) || String(d.whatsappNumber || '');
-          const curTpl = String(d.whatsappPatientClaimTemplate ?? DEFAULT_LAB_PROFILE.whatsappPatientClaimTemplate);
-          publicProfile = {
-            labName: String(d.labName || DEFAULT_LAB_PROFILE.labName),
-            tagline: String(d.tagline ?? DEFAULT_LAB_PROFILE.tagline),
-            director: String(d.director ?? DEFAULT_LAB_PROFILE.director),
-            hotlineNumber: String(d.hotlineNumber ?? DEFAULT_LAB_PROFILE.hotlineNumber),
-            whatsappNumber:
-              !curWa || curWa === '201100874444' ? DEFAULT_LAB_PROFILE.whatsappNumber : curWa,
-            address: String(d.address ?? DEFAULT_LAB_PROFILE.address),
-            workingHours: String(d.workingHours ?? DEFAULT_LAB_PROFILE.workingHours),
-            branches: Array.isArray(d.branches) ? d.branches.map(String) : DEFAULT_LAB_PROFILE.branches,
-            logoUrl: String(d.logoUrl || DEFAULT_ASSET_LOGO),
-            whatsappPatientClaimTemplate: curTpl.includes('{prizeTerms}')
-              ? curTpl
-              : DEFAULT_LAB_PROFILE.whatsappPatientClaimTemplate,
-            shareBaseUrl: String(d.shareBaseUrl ?? ''),
-          };
+          publicProfile = applyProfileFields(snap.data(), DEFAULT_LAB_PROFILE);
         }
         emit();
       },
       (err) => {
+        if (typeof navigator !== 'undefined' && !navigator.onLine) {
+          const fallback = loadCachedDashboard();
+          if (fallback) {
+            onData(fallback);
+            return;
+          }
+        }
         try {
           handleFirestoreError(err, OperationType.GET, 'publicConfig/labProfile');
         } catch (wrapped) {
@@ -1142,6 +1573,7 @@ export const apiClient = {
         emit();
       },
       (err) => {
+        if (typeof navigator !== 'undefined' && !navigator.onLine) return;
         try {
           handleFirestoreError(err, OperationType.GET, 'adminSettings/templates');
         } catch (wrapped) {
@@ -1169,6 +1601,15 @@ export const apiClient = {
                 : matched?.terms || buildDefaultPrizeTerms({ title, category, validHours }),
               discountLabel: String(data.discountLabel || 'هدية خاصة'),
               category,
+              distributionTier: resolvePrizeDistributionTier({
+                category,
+                title,
+                discountLabel: String(data.discountLabel || ''),
+                distributionTier: data.distributionTier as Prize['distributionTier'],
+              }),
+              estimatedCostEgp:
+                typeof data.estimatedCostEgp === 'number' ? data.estimatedCostEgp : undefined,
+              offerPriceEgp: typeof data.offerPriceEgp === 'number' ? data.offerPriceEgp : undefined,
               validHours,
               weight: Number(data.weight || 20),
               stock: Number(data.stock || 50),
@@ -1180,6 +1621,7 @@ export const apiClient = {
         emit();
       },
       (err) => {
+        if (typeof navigator !== 'undefined' && !navigator.onLine) return;
         try {
           handleFirestoreError(err, OperationType.LIST, 'prizes');
         } catch (wrapped) {
@@ -1192,11 +1634,10 @@ export const apiClient = {
       collection(db, 'giftLinks'),
       async (snap) => {
         const docs = snap.docs;
-        // Fetch private phone numbers for any uncached link IDs (or empty cache retries)
         const missingIds = docs
           .map((d) => d.id)
           .filter((id) => !phoneCache.has(id) || !phoneCache.get(id));
-        if (missingIds.length > 0) {
+        if (missingIds.length > 0 && (typeof navigator === 'undefined' || navigator.onLine)) {
           await Promise.all(
             missingIds.map(async (id) => {
               try {
@@ -1223,6 +1664,7 @@ export const apiClient = {
         emit();
       },
       (err) => {
+        if (typeof navigator !== 'undefined' && !navigator.onLine) return;
         try {
           handleFirestoreError(err, OperationType.LIST, 'giftLinks');
         } catch (wrapped) {
@@ -1251,6 +1693,7 @@ export const apiClient = {
         emit();
       },
       (err) => {
+        if (typeof navigator !== 'undefined' && !navigator.onLine) return;
         try {
           handleFirestoreError(err, OperationType.LIST, 'prices');
         } catch (wrapped) {
@@ -1274,6 +1717,10 @@ export const apiClient = {
     branchName?: string;
     visitRef?: string;
     linkValidDays?: number;
+    gameMode?: GameMode;
+    campaignName?: string;
+    loyaltyTier?: LoyaltyTier;
+    isBirthdayGift?: boolean;
   }): Promise<{ ok: boolean; link?: GiftLink; message?: string }> {
     const clientName = String(body.clientName || '').trim().slice(0, 120);
     const clientPhone = String(body.clientPhone || '').trim().slice(0, 40);
@@ -1289,6 +1736,67 @@ export const apiClient = {
     const expiresAt = new Date(now + days * 24 * 3600_000).toISOString();
     const canonicalPhone = normalizeCanonicalPhone(clientPhone);
     const phoneHash = canonicalPhone.length >= 8 ? await hashPhoneNumber(canonicalPhone) : '';
+    const gameMode = normalizeGameMode(body.gameMode || 'box');
+    const campaignName = body.campaignName?.trim().slice(0, 120) || null;
+    const loyaltyTier = normalizeLoyaltyTier(body.loyaltyTier || 'Basic');
+    const isBirthdayGift = Boolean(body.isBirthdayGift);
+    const referralCode = randomCode('RTREF-', 5);
+
+    // Slide 2 Pre-committed Prize Invariant: Decide prize and code on link creation before patient plays!
+    const prizes = await fetchActivePrizes();
+    const chosen = pickWeightedPrize(prizes);
+    const validHours = Math.max(1, Number(chosen.validHours || 48));
+    const prizeTerms = (chosen.terms || buildDefaultPrizeTerms(chosen)).slice(0, 1000);
+    const prizeCode = randomCode('RTWIN-', 6);
+
+    const createdLink: GiftLink = {
+      id: token,
+      token,
+      clientName,
+      clientPhone: canonicalPhone || clientPhone,
+      visitRef,
+      branchName,
+      phoneHash: phoneHash || null,
+      status: 'pending',
+      gameMode,
+      campaignName,
+      loyaltyTier,
+      loyaltyPoints: loyaltyTier === 'VIP' ? 200 : loyaltyTier === 'Plus' ? 100 : 50,
+      referralCode,
+      isBirthdayGift,
+      createdAt: new Date(now).toISOString(),
+      expiresAt,
+      openedAt: null,
+      redeemedAt: null,
+      redeemedBy: null,
+      appointmentAt: null,
+      appointmentNote: null,
+      prizeId: chosen.id,
+      prizeTitle: chosen.title,
+      prizeDescription: chosen.description,
+      prizeTerms,
+      prizeDiscountLabel: chosen.discountLabel,
+      prizeCategory: chosen.category,
+      prizeCode,
+      validHours,
+    };
+
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      enqueueOfflineMutation('create_link', { link: createdLink });
+      const cachedDash = loadCachedDashboard();
+      if (cachedDash) {
+        saveCachedDashboard({
+          ...cachedDash,
+          giftLinks: [createdLink, ...cachedDash.giftLinks],
+          stats: computeDashboardStats(
+            [createdLink, ...cachedDash.giftLinks],
+            cachedDash.prizes,
+            cachedDash.prices
+          ),
+        });
+      }
+      return { ok: true, link: createdLink };
+    }
 
     const batch = writeBatch(db);
     batch.set(doc(db, 'giftLinks', token), {
@@ -1299,20 +1807,31 @@ export const apiClient = {
       branchName,
       ...(phoneHash ? { phoneHash } : {}),
       status: 'pending',
+      gameMode,
+      ...(campaignName ? { campaignName } : {}),
+      loyaltyTier,
+      loyaltyPoints: createdLink.loyaltyPoints,
+      referralCode,
+      isBirthdayGift,
       createdAt: serverTimestamp(),
       expiresAt,
       openedAt: null,
       redeemedAt: null,
       redeemedBy: null,
+      cancelledAt: null,
+      cancelledBy: null,
+      invoiceAmount: null,
+      rewardCost: null,
       appointmentAt: null,
       appointmentNote: null,
-      prizeId: null,
-      prizeTitle: null,
-      prizeDescription: null,
-      prizeDiscountLabel: null,
-      prizeCategory: null,
-      prizeCode: null,
-      validHours: null,
+      prizeId: chosen.id.slice(0, 128),
+      prizeTitle: chosen.title.slice(0, 200),
+      prizeDescription: chosen.description.slice(0, 600),
+      prizeTerms,
+      prizeDiscountLabel: chosen.discountLabel.slice(0, 80),
+      prizeCategory: chosen.category.slice(0, 40),
+      prizeCode,
+      validHours,
       updatedAt: serverTimestamp(),
     });
     batch.set(doc(db, 'giftLinks', token, 'private', 'contact'), {
@@ -1324,36 +1843,11 @@ export const apiClient = {
     try {
       await batch.commit();
     } catch (error) {
+      enqueueOfflineMutation('create_link', { link: createdLink });
       handleFirestoreError(error, OperationType.WRITE, `giftLinks/${token}`);
     }
 
-    return {
-      ok: true,
-      link: {
-        id: token,
-        token,
-        clientName,
-        clientPhone: canonicalPhone || clientPhone,
-        visitRef,
-        branchName,
-        phoneHash: phoneHash || null,
-        status: 'pending',
-        createdAt: new Date(now).toISOString(),
-        expiresAt,
-        openedAt: null,
-        redeemedAt: null,
-        redeemedBy: null,
-        appointmentAt: null,
-        appointmentNote: null,
-        prizeId: null,
-        prizeTitle: null,
-        prizeDescription: null,
-        prizeDiscountLabel: null,
-        prizeCategory: null,
-        prizeCode: null,
-        validHours: null,
-      },
-    };
+    return { ok: true, link: createdLink };
   },
 
   async updateAppointment(
@@ -1363,6 +1857,11 @@ export const apiClient = {
   ): Promise<{ ok: boolean; message?: string }> {
     const cleanId = normalizeId(id);
     if (!cleanId) return { ok: false, message: 'معرف الرابط غير صالح.' };
+
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      enqueueOfflineMutation('update_appointment', { id: cleanId, appointmentAt, appointmentNote });
+      return { ok: true, message: 'تم حفظ الموعد محلياً وستتم مزامنته تلقائياً عند عودة الاتصال.' };
+    }
 
     try {
       await updateDoc(doc(db, 'giftLinks', cleanId), {
@@ -1380,7 +1879,6 @@ export const apiClient = {
     const cleanId = normalizeId(id);
     if (!cleanId) return false;
 
-    // Immediately record local tombstone & scrub localStorage caches so deleted record can never resurrect
     addDeletedTokensLocally([cleanId]);
 
     let phoneHash = '';
@@ -1395,7 +1893,7 @@ export const apiClient = {
         }
       }
     } catch {
-      // continue deleting link
+      // continue deleting
     }
 
     const batch = writeBatch(db);
@@ -1423,9 +1921,26 @@ export const apiClient = {
     }
   },
 
-  async redeemPrize(code: string, staffName = 'استقبال المعمل'): Promise<{ ok: boolean; message: string }> {
+  async redeemPrize(
+    code: string,
+    staffName = 'استقبال المعمل',
+    financial?: { invoiceAmount?: number; rewardCost?: number }
+  ): Promise<{ ok: boolean; message: string }> {
     const q = code.trim().toUpperCase();
     if (!q) return { ok: false, message: 'يرجى إدخال كود الجائزة.' };
+
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      enqueueOfflineMutation('redeem_code', {
+        code: q,
+        staffName,
+        invoiceAmount: financial?.invoiceAmount,
+        rewardCost: financial?.rewardCost,
+      });
+      return {
+        ok: true,
+        message: 'تم تسجيل الصرف محلياً في وضع الأوفلاين وسيتم تأكيده سحابياً فور عودة الإنترنت.',
+      };
+    }
 
     try {
       const snap = await getDocs(collection(db, 'giftLinks'));
@@ -1446,16 +1961,54 @@ export const apiClient = {
       if (data.status === 'redeemed') {
         return { ok: false, message: `تم صرف هذه الجائزة مسبقاً للمريض (${data.clientName}).` };
       }
+      if (data.status === 'cancelled') {
+        return { ok: false, message: `هذا الكود ملغي ولا يمكن صرفه (${data.clientName}).` };
+      }
+
+      const currentPoints = typeof data.loyaltyPoints === 'number' ? data.loyaltyPoints : 50;
+      const nextPoints = currentPoints + 100;
+      const nextTier: LoyaltyTier =
+        nextPoints >= 300 ? 'VIP' : nextPoints >= 150 ? 'Plus' : (normalizeLoyaltyTier(data.loyaltyTier) || 'Basic');
 
       await updateDoc(doc(db, 'giftLinks', matched.id), {
         status: 'redeemed',
         redeemedAt: new Date().toISOString(),
         redeemedBy: staffName.slice(0, 120),
+        loyaltyPoints: nextPoints,
+        loyaltyTier: nextTier,
+        ...(typeof financial?.invoiceAmount === 'number' && financial.invoiceAmount >= 0
+          ? { invoiceAmount: financial.invoiceAmount }
+          : {}),
+        ...(typeof financial?.rewardCost === 'number' && financial.rewardCost >= 0
+          ? { rewardCost: financial.rewardCost }
+          : {}),
         updatedAt: serverTimestamp(),
       });
       return { ok: true, message: `تم تأكيد صرف الجائزة للمريض (${data.clientName}) بنجاح.` };
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, 'giftLinks/redeem');
+    }
+  },
+
+  async cancelGiftLink(id: string, staffName = 'إدارة المعمل'): Promise<{ ok: boolean; message: string }> {
+    const cleanId = normalizeId(id);
+    if (!cleanId) return { ok: false, message: 'معرف السجل غير صالح.' };
+
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      enqueueOfflineMutation('cancel_link', { id: cleanId, staffName });
+      return { ok: true, message: 'تم جدولة إلغاء الكود محلياً وسيتم تحديث السحابة عند عودة الشبكة.' };
+    }
+
+    try {
+      await updateDoc(doc(db, 'giftLinks', cleanId), {
+        status: 'cancelled',
+        cancelledAt: new Date().toISOString(),
+        cancelledBy: staffName.slice(0, 120),
+        updatedAt: serverTimestamp(),
+      });
+      return { ok: true, message: 'تم إلغاء الكود ومنع استخدامه بنجاح.' };
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `giftLinks/${cleanId}/cancel`);
     }
   },
 
@@ -1468,14 +2021,21 @@ export const apiClient = {
     const validHours = Math.min(2160, Math.max(1, Number(prize.validHours || 48)));
     const termsRaw = String(prize.terms || '').trim();
     const terms = (termsRaw || buildDefaultPrizeTerms({ title, category, validHours })).slice(0, 1000);
+    const discountLabel = String(prize.discountLabel || 'هدية خاصة').trim().slice(0, 80);
 
-    const payload = {
+    const payload: Record<string, unknown> = {
       id,
       title,
       description: String(prize.description || '').trim().slice(0, 600),
       terms,
-      discountLabel: String(prize.discountLabel || 'هدية خاصة').trim().slice(0, 80),
+      discountLabel,
       category,
+      distributionTier: resolvePrizeDistributionTier({
+        category,
+        title,
+        discountLabel,
+        distributionTier: prize.distributionTier,
+      }),
       validHours,
       weight: Math.min(1000, Math.max(1, Number(prize.weight || 20))),
       stock: Math.min(100000, Math.max(1, Number(prize.stock || 50))),
@@ -1483,6 +2043,12 @@ export const apiClient = {
       active: prize.active ?? true,
       updatedAt: serverTimestamp(),
     };
+    if (typeof prize.estimatedCostEgp === 'number') {
+      payload.estimatedCostEgp = Math.max(0, prize.estimatedCostEgp);
+    }
+    if (typeof prize.offerPriceEgp === 'number') {
+      payload.offerPriceEgp = Math.max(0, prize.offerPriceEgp);
+    }
 
     try {
       const batch = writeBatch(db);
@@ -1520,13 +2086,19 @@ export const apiClient = {
           )
             .trim()
             .slice(0, 1000);
+          const discountLabel = String(item.discountLabel || 'هدية خاصة').trim().slice(0, 80);
           batch.set(doc(db, 'prizes', id), {
             id,
             title: String(item.title || '').trim().slice(0, 200),
             description: String(item.description || item.title || '').trim().slice(0, 600),
             terms,
-            discountLabel: String(item.discountLabel || 'هدية خاصة').trim().slice(0, 80),
+            discountLabel,
             category: item.category,
+            distributionTier: resolvePrizeDistributionTier({
+              category: item.category,
+              title: item.title,
+              discountLabel,
+            }),
             validHours,
             weight: Math.min(1000, Math.max(1, Number(item.weight || 15))),
             stock: Math.min(100000, Math.max(1, Number(item.stock || 50))),
@@ -1602,6 +2174,7 @@ export const apiClient = {
       batch.set(doc(db, 'publicConfig', 'labProfile'), buildPublicProfilePayload(payload));
       batch.set(doc(db, 'adminSettings', 'templates'), buildAdminTemplatesPayload(payload));
       await batch.commit();
+      saveCachedPublicProfile(payload);
       return { ok: true, labProfile: payload, message: 'تم حفظ بيانات المعمل والشعار في السحابة بنجاح.' };
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, 'publicConfig/labProfile');
@@ -1635,9 +2208,7 @@ export const apiClient = {
     }
   },
 
-  async bulkSavePrices(
-    changedPrices: LabPriceItem[]
-  ): Promise<{ ok: boolean; message?: string }> {
+  async bulkSavePrices(changedPrices: LabPriceItem[]): Promise<{ ok: boolean; message?: string }> {
     const baseMap = new Map(INITIAL_PRICES.map((p) => [p.id, p]));
     const modified = changedPrices.filter((item) => {
       const orig = baseMap.get(item.id);
@@ -1655,7 +2226,6 @@ export const apiClient = {
     }
 
     try {
-      // Commit in batches of 400 to respect Firestore 500-op limit
       for (let i = 0; i < modified.length; i += 400) {
         const chunk = modified.slice(i, i + 400);
         const batch = writeBatch(db);
@@ -1712,7 +2282,7 @@ export const apiClient = {
 
   async exportFullBackup(currentData: AdminDashboardData): Promise<FullBackupPayload> {
     return {
-      version: '3.0',
+      version: '4.0',
       exportedAt: new Date().toISOString(),
       labProfile: currentData.labProfile,
       prizes: currentData.prizes,
@@ -1748,13 +2318,21 @@ export const apiClient = {
         for (const p of parsed.prizes as Prize[]) {
           const cleanId = normalizeDocId(String(p.id || `prz_${Date.now().toString(36)}`));
           if (!cleanId) continue;
+          const discountLabel = String(p.discountLabel || 'هدية خاصة').slice(0, 80);
+          const category = (p.category || 'DISCOUNT') as PrizeCategory;
           batch.set(doc(db, 'prizes', cleanId), {
             id: cleanId,
             title: String(p.title || '').slice(0, 200),
             description: String(p.description || '').slice(0, 600),
             terms: String(p.terms || '').slice(0, 1000),
-            discountLabel: String(p.discountLabel || 'هدية خاصة').slice(0, 80),
-            category: (p.category || 'DISCOUNT') as PrizeCategory,
+            discountLabel,
+            category,
+            distributionTier: resolvePrizeDistributionTier({
+              category,
+              title: String(p.title || ''),
+              discountLabel,
+              distributionTier: p.distributionTier,
+            }),
             validHours: Math.min(2160, Math.max(1, Number(p.validHours || 48))),
             weight: Math.min(1000, Math.max(1, Number(p.weight || 20))),
             stock: Math.min(100000, Math.max(1, Number(p.stock || 50))),
@@ -1782,11 +2360,22 @@ export const apiClient = {
               visitRef: String(lnk.visitRef || '').slice(0, 64),
               branchName: String(lnk.branchName || '').slice(0, 160),
               status: lnk.status || 'pending',
+              gameMode: lnk.gameMode || 'box',
+              campaignName: lnk.campaignName || null,
+              loyaltyTier: lnk.loyaltyTier || 'Basic',
+              loyaltyPoints: lnk.loyaltyPoints ?? 50,
+              referralCode: lnk.referralCode || null,
               createdAt: serverTimestamp(),
-              expiresAt: String(lnk.expiresAt || new Date(Date.now() + 14 * 86400_000).toISOString()).slice(0, 64),
+              expiresAt: String(
+                lnk.expiresAt || new Date(Date.now() + 14 * 86400_000).toISOString()
+              ).slice(0, 64),
               openedAt: lnk.openedAt || null,
               redeemedAt: lnk.redeemedAt || null,
               redeemedBy: lnk.redeemedBy || null,
+              cancelledAt: lnk.cancelledAt || null,
+              cancelledBy: lnk.cancelledBy || null,
+              invoiceAmount: lnk.invoiceAmount ?? null,
+              rewardCost: lnk.rewardCost ?? null,
               appointmentAt: lnk.appointmentAt || null,
               appointmentNote: lnk.appointmentNote || null,
               prizeId: lnk.prizeId || null,
@@ -1841,13 +2430,16 @@ export const apiClient = {
     }
   },
 
-  async syncCachedBoxToCloud(cachedBox: BoxPublicResponse): Promise<boolean> {
+  async syncCachedBoxToCloud(cachedBox: BoxPublicResponse, clientPhone = ''): Promise<boolean> {
     const clean = normalizeId(cachedBox.token || '');
     if (!clean || !cachedBox.prize || (cachedBox.status !== 'opened' && cachedBox.status !== 'redeemed')) {
       return false;
     }
     if (getDeletedTokensSet().has(clean)) {
       addDeletedTokensLocally([clean]);
+      return false;
+    }
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
       return false;
     }
     try {
@@ -1860,7 +2452,7 @@ export const apiClient = {
       const snap = await getDoc(doc(db, 'giftLinks', clean));
       if (snap.exists()) {
         const existing = snap.data();
-        if (existing.status === 'opened' || existing.status === 'redeemed') {
+        if (existing.status === 'opened' || existing.status === 'redeemed' || existing.status === 'cancelled') {
           return false;
         }
       }
@@ -1886,6 +2478,10 @@ export const apiClient = {
           status: 'opened',
           openedAt,
           expiresAt,
+          gameMode: cachedBox.gameMode || 'box',
+          ...(typeof cachedBox.selectedGameBox === 'number'
+            ? { selectedGameBox: cachedBox.selectedGameBox }
+            : {}),
           prizeId: 'prz_cached',
           prizeTitle: cachedBox.prize.title.slice(0, 200),
           prizeDescription: (cachedBox.prize.description || '').slice(0, 600),
@@ -1897,18 +2493,33 @@ export const apiClient = {
           updatedAt: serverTimestamp(),
         });
       } else {
+        const canonicalPhone = normalizeCanonicalPhone(clientPhone);
+        const phoneHash = canonicalPhone.length >= 8 ? await hashPhoneNumber(canonicalPhone) : '';
         batch.set(doc(db, 'giftLinks', clean), {
           id: clean,
           token: clean,
           clientName: String(cachedBox.clientName || 'عميلنا العزيز').slice(0, 120),
           visitRef: String(cachedBox.visitRef || `RT-${Math.floor(1000 + Math.random() * 9000)}`).slice(0, 64),
           branchName: String(cachedBox.branchName || DEFAULT_LAB_PROFILE.branches[0]).slice(0, 160),
+          ...(phoneHash ? { phoneHash } : {}),
           status: 'opened',
+          gameMode: cachedBox.gameMode || 'box',
+          ...(typeof cachedBox.selectedGameBox === 'number'
+            ? { selectedGameBox: cachedBox.selectedGameBox }
+            : {}),
+          loyaltyTier: cachedBox.loyaltyTier || 'Basic',
+          loyaltyPoints: cachedBox.loyaltyPoints ?? 50,
+          referralCode: cachedBox.referralCode || null,
+          isBirthdayGift: Boolean(cachedBox.isBirthdayGift),
           createdAt: serverTimestamp(),
           expiresAt,
           openedAt,
           redeemedAt: null,
           redeemedBy: null,
+          cancelledAt: null,
+          cancelledBy: null,
+          invoiceAmount: null,
+          rewardCost: null,
           appointmentAt: cachedBox.appointmentAt || null,
           appointmentNote: cachedBox.appointmentNote || null,
           prizeId: 'prz_cached',
@@ -1922,7 +2533,7 @@ export const apiClient = {
           updatedAt: serverTimestamp(),
         });
         batch.set(doc(db, 'giftLinks', clean, 'private', 'contact'), {
-          clientPhone: '',
+          clientPhone: canonicalPhone || '',
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
@@ -1938,7 +2549,15 @@ export const apiClient = {
     dashboardData: AdminDashboardData;
     recoveredLocalCount: number;
   }> {
-    // Step 1: Fetch authoritative server state for giftLinks & permanent deletion tombstones
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      const cached = loadCachedDashboard();
+      if (cached) {
+        return { dashboardData: cached, recoveredLocalCount: 0 };
+      }
+    }
+
+    await syncOfflineQueue();
+
     const [initialLinksSnap, deletedSnap] = await Promise.all([
       getDocsFromServer(collection(db, 'giftLinks')),
       getDocsFromServer(collection(db, 'deletedLinks')).catch(() => null),
@@ -1955,14 +2574,12 @@ export const apiClient = {
     }
     let recoveredLocalCount = 0;
 
-    // Step 2: Recover any locally-cached bookings from this browser's localStorage that never reached Firestore
-    // (explicitly skipping any token that has been deleted)
     if (typeof window !== 'undefined' && window.localStorage) {
       try {
         const localCandidates: Array<Record<string, unknown>> = [];
         for (let i = 0; i < window.localStorage.length; i++) {
           const key = window.localStorage.key(i);
-          if (!key || key === DELETED_TOKENS_STORAGE_KEY) continue;
+          if (!key || key === DELETED_TOKENS_STORAGE_KEY || key.startsWith('rt_hb_offline_')) continue;
           if (key.startsWith('rt_hb_won_') || key.includes('giftLinks') || key.includes('happiness')) {
             const raw = window.localStorage.getItem(key);
             if (!raw) continue;
@@ -1982,7 +2599,7 @@ export const apiClient = {
                 }
               }
             } catch {
-              // ignore non-JSON entries
+              // ignore
             }
           }
         }
@@ -2023,6 +2640,7 @@ export const apiClient = {
                 branchName: String(c.branchName || DEFAULT_LAB_PROFILE.branches[0]).slice(0, 160),
                 ...(phoneHash ? { phoneHash } : {}),
                 status: 'opened',
+                gameMode: c.gameMode || 'box',
                 createdAt: serverTimestamp(),
                 expiresAt,
                 openedAt,
@@ -2056,7 +2674,6 @@ export const apiClient = {
       }
     }
 
-    // Step 3: Fetch remaining collections directly from server
     const [profileSnap, templatesSnap, prizesSnap, pricesSnap] = await Promise.all([
       getDocFromServer(doc(db, 'publicConfig', 'labProfile')).catch(() => null),
       getDocFromServer(doc(db, 'adminSettings', 'templates')).catch(() => null),
@@ -2064,25 +2681,9 @@ export const apiClient = {
       getDocsFromServer(collection(db, 'prices')),
     ]);
 
-    const labProfile: LabProfile = { ...DEFAULT_LAB_PROFILE };
+    let labProfile: LabProfile = { ...DEFAULT_LAB_PROFILE };
     if (profileSnap?.exists()) {
-      const d = profileSnap.data();
-      const curWa = formatWhatsAppPhone(String(d.whatsappNumber || '')) || String(d.whatsappNumber || '');
-      const curTpl = String(d.whatsappPatientClaimTemplate ?? labProfile.whatsappPatientClaimTemplate);
-      labProfile.labName = String(d.labName || labProfile.labName);
-      labProfile.tagline = String(d.tagline ?? labProfile.tagline);
-      labProfile.director = String(d.director ?? labProfile.director);
-      labProfile.hotlineNumber = String(d.hotlineNumber ?? labProfile.hotlineNumber);
-      labProfile.whatsappNumber =
-        !curWa || curWa === '201100874444' ? DEFAULT_LAB_PROFILE.whatsappNumber : curWa;
-      labProfile.address = String(d.address ?? labProfile.address);
-      labProfile.workingHours = String(d.workingHours ?? labProfile.workingHours);
-      labProfile.branches = Array.isArray(d.branches) ? d.branches.map(String) : labProfile.branches;
-      labProfile.logoUrl = String(d.logoUrl || DEFAULT_ASSET_LOGO);
-      labProfile.whatsappPatientClaimTemplate = curTpl.includes('{prizeTerms}')
-        ? curTpl
-        : DEFAULT_LAB_PROFILE.whatsappPatientClaimTemplate;
-      labProfile.shareBaseUrl = String(d.shareBaseUrl ?? '');
+      labProfile = applyProfileFields(profileSnap.data(), labProfile);
     }
     if (templatesSnap?.exists()) {
       const d = templatesSnap.data();
@@ -2111,6 +2712,15 @@ export const apiClient = {
               : matched?.terms || buildDefaultPrizeTerms({ title, category, validHours }),
             discountLabel: String(data.discountLabel || 'هدية خاصة'),
             category,
+            distributionTier: resolvePrizeDistributionTier({
+              category,
+              title,
+              discountLabel: String(data.discountLabel || ''),
+              distributionTier: data.distributionTier as Prize['distributionTier'],
+            }),
+            estimatedCostEgp:
+              typeof data.estimatedCostEgp === 'number' ? data.estimatedCostEgp : undefined,
+            offerPriceEgp: typeof data.offerPriceEgp === 'number' ? data.offerPriceEgp : undefined,
             validHours,
             weight: Number(data.weight || 20),
             stock: Number(data.stock || 50),
@@ -2164,23 +2774,18 @@ export const apiClient = {
       usedCount: Math.max(p.usedCount, usedMap.get(p.id) || 0),
     }));
 
+    const dashboardData: AdminDashboardData = {
+      labProfile,
+      prizes: enrichedPrizes,
+      giftLinks,
+      prices,
+      stats: computeDashboardStats(giftLinks, enrichedPrizes, prices),
+    };
+    saveCachedDashboard(dashboardData);
+
     return {
       recoveredLocalCount,
-      dashboardData: {
-        labProfile,
-        prizes: enrichedPrizes,
-        giftLinks,
-        prices,
-        stats: {
-          totalLinks: giftLinks.length,
-          pendingLinks: giftLinks.filter((l) => l.status === 'pending').length,
-          openedLinks: giftLinks.filter((l) => l.status === 'opened').length,
-          redeemedLinks: giftLinks.filter((l) => l.status === 'redeemed').length,
-          expiredLinks: giftLinks.filter((l) => l.status === 'expired').length,
-          activePrizes: enrichedPrizes.filter((p) => p.active).length,
-          totalPrices: prices.filter((p) => p.active).length,
-        },
-      },
+      dashboardData,
     };
   },
 
@@ -2263,11 +2868,19 @@ export const apiClient = {
             branchName: String(item.branchName || DEFAULT_LAB_PROFILE.branches[0]).slice(0, 160),
             ...(phoneHash ? { phoneHash } : {}),
             status,
+            gameMode: 'box',
+            loyaltyTier: 'Basic',
+            loyaltyPoints: status === 'redeemed' ? 150 : 50,
+            referralCode: randomCode('RTREF-', 5),
             createdAt: serverTimestamp(),
             expiresAt,
             openedAt,
             redeemedAt: status === 'redeemed' ? openedAt : null,
             redeemedBy: status === 'redeemed' ? 'استيراد وتفعيل من الإدارة' : null,
+            cancelledAt: null,
+            cancelledBy: null,
+            invoiceAmount: null,
+            rewardCost: null,
             appointmentAt: null,
             appointmentNote: null,
             prizeId: (matchedPrize?.id || 'prz_imported').slice(0, 128),

@@ -101,6 +101,13 @@ const RAW_PRIZES: RawPrizeSeed[] = [
   { id: 'prz_surp_group_exclusive', title: 'جائزة حصرية لأعضاء جروب الفحص الشامل', discountLabel: 'حصرية للجروب', category: 'SURPRISE', description: 'مفاجأة وميزة حصرية مخصصة لأعضاء جروب الفحص الشامل لمعامل RT.', validHours: 72, weight: 14, stock: 70 },
   { id: 'prz_surp_vip_care', title: 'أنت تستحق معاملة VIP', discountLabel: 'معاملة VIP', category: 'SURPRISE', description: 'أولوية قصوى دون انتظار + ضيافة خاصة + متابعة طبية مباشرة من المعمل.', validHours: 96, weight: 16, stock: 80 },
   { id: 'prz_surp_happy_family', title: 'جائزة العائلة السعيدة', discountLabel: 'العائلة السعيدة', category: 'SURPRISE', description: 'مفاجأة عائلية خاصة من د. رامي مختار ومعامل RT لكل أفراد أسرتك.', validHours: 96, weight: 12, stock: 50 },
+
+  // 5. PAID_OFFER — عروض مدفوعة خاصة (Slide 3 & 4: باقات بسعر خاص + 5 تحاليل بسعر معلن)
+  { id: 'prz_paid_5tests_299', title: 'باقة 5 تحاليل أساسية بسعر خاص معلن 299 جنيه', discountLabel: 'عرض 299 ج.م', category: 'PAID_OFFER', description: 'باقة مدفوعة خاصة تشمل 5 تحاليل اطمئنان أساسية (CBC + FBS + Creatinine + ALT + Uric Acid) بسعر معلن 299 جنيه فقط.', validHours: 96, weight: 22, stock: 120 },
+  { id: 'prz_paid_checkup_399', title: 'باقة الفحص الأساسي المعلنة بسعر 399 جنيه + خصم 15% إضافي', discountLabel: 'باقة 399 ج.م', category: 'PAID_OFFER', description: 'عرض باقة الفحص الأساسي المعلنة بسعر 399 جنيه شاملة سحب العينة والتقرير المعتمد.', validHours: 96, weight: 20, stock: 100 },
+  { id: 'prz_paid_adv_555', title: 'باقة الفحص المتقدم الشاملة بسعر خاص 555 جنيه', discountLabel: 'باقة 555 ج.م', category: 'PAID_OFFER', description: 'عرض باقة الفحص المتقدم بسعر معلن 555 جنيه تشمل الكبد والكلى والسكر التراكمي والدهون.', validHours: 96, weight: 18, stock: 80 },
+  { id: 'prz_paid_5vitamins_499', title: 'عرض باقة 5 تحاليل فيتامينات ومعادن بسعر خاص 499 جنيه', discountLabel: 'عرض 499 ج.م', category: 'PAID_OFFER', description: 'باقة مدفوعة موفرة تشمل (Vitamin D + B12 + Ferritin + Calcium + CBC) بسعر معلن 499 جنيه.', validHours: 96, weight: 16, stock: 80 },
+  { id: 'prz_paid_vip_999', title: 'باقة VIP الشاملة بسعر خاص 999 جنيه + أولوية حجز', discountLabel: 'باقة VIP 999 ج.م', category: 'PAID_OFFER', description: 'عرض باقة VIP الشاملة بسعر خاص 999 جنيه مع أولوية حجز ونتائج سريعة.', validHours: 96, weight: 10, stock: 40 },
 ];
 
 function detectFastingRequirement(title: string): string {
@@ -188,6 +195,9 @@ export function buildDefaultPrizeTerms(input: {
     } else {
       lines.push('شروط الاستلام: تُسلّم الهدية العينية عند الحضور للفرع أو مع فريق السحب المنزلي بشرط تأكيد الكود مسبقاً.');
     }
+  } else if (input.category === 'PAID_OFFER') {
+    lines.push('نطاق العرض المدفوع: السعر المعلن يشمل كافة التحاليل المحددة في الباقة ورسوم السحب بالفرع بدون أي رسوم خفية.');
+    lines.push('تُجرى الباقة في أي فرع من فروع معامل RT خلال ساعات العمل الرسمية، ويُعلن أي تحضير مطلوب (كالصيام) بوضوح قبل السحب.');
   } else {
     if (t.includes('سحب') || t.includes('تذكرة')) {
       lines.push('آلية السحب: يُسجل كود الجائزة واسم العميل تلقائياً في السحب الشهري المعلن في معامل RT وتُعلن النتائج على القنوات الرسمية.');
@@ -207,8 +217,31 @@ export function buildDefaultPrizeTerms(input: {
   return lines.join('\n');
 }
 
+export function resolvePrizeDistributionTier(prize: Pick<Prize, 'category' | 'title' | 'discountLabel' | 'distributionTier'>): NonNullable<Prize['distributionTier']> {
+  if (prize.distributionTier) return prize.distributionTier;
+  const t = `${prize.title} ${prize.discountLabel}`.toLowerCase();
+  if (prize.category === 'PAID_OFFER') return 'paid_offer';
+  if (prize.category === 'DISCOUNT' || prize.category === 'discount') {
+    if (t.includes('60%') || t.includes('70%') || t.includes('80%')) return 'disc_high';
+    return 'disc_mid';
+  }
+  if (
+    prize.category === 'PHYSICAL_GIFT' ||
+    prize.category === 'gift' ||
+    t.includes('golden') ||
+    t.includes('الجائزة الكبرى') ||
+    t.includes('قسيمة') ||
+    t.includes('vip 999')
+  ) {
+    return 'grand_prize';
+  }
+  if (prize.category === 'SURPRISE') return 'vip_surprise';
+  return 'free_gift';
+}
+
 export const DEFAULT_PRIZES: Prize[] = RAW_PRIZES.map((p) => ({
   ...p,
+  distributionTier: resolvePrizeDistributionTier(p),
   terms: buildDefaultPrizeTerms(p),
   usedCount: 0,
   active: true,
@@ -245,47 +278,52 @@ export const PRIZE_CATEGORY_META: Record<
   DISCOUNT: {
     label: 'DISCOUNT — خصومات',
     shortLabel: 'خصومات',
-    badgeClass: 'border-amber-200 bg-amber-50 text-amber-800',
+    badgeClass: 'border-amber-300 bg-amber-50 text-amber-900',
   },
   FREE_SERVICE: {
     label: 'FREE_SERVICE — تحاليل وفحوصات وزيارات',
     shortLabel: 'تحاليل وخدمات مجانية',
-    badgeClass: 'border-emerald-200 bg-emerald-50 text-emerald-800',
+    badgeClass: 'border-emerald-300 bg-emerald-50 text-emerald-900',
+  },
+  PAID_OFFER: {
+    label: 'PAID_OFFER — عروض وباقات مدفوعة خاصة',
+    shortLabel: 'عرض مدفوع خاص',
+    badgeClass: 'border-[#C9962D]/50 bg-[#FFF8EB] text-[#7A5600]',
   },
   PHYSICAL_GIFT: {
-    label: 'PHYSICAL_GIFT — هدايا مادية',
+    label: 'PHYSICAL_GIFT — هدايا مادية وقسائم',
     shortLabel: 'هدايا مادية',
-    badgeClass: 'border-purple-200 bg-purple-50 text-purple-800',
+    badgeClass: 'border-[#5C1422]/25 bg-[#5C1422]/8 text-[#5C1422]',
   },
   SURPRISE: {
-    label: 'SURPRISE — مفاجآت والسحب',
-    shortLabel: 'مفاجآت والسحب',
-    badgeClass: 'border-teal-200 bg-teal-50 text-teal-800',
+    label: 'SURPRISE — مفاجآت VIP والسحب والولاء',
+    shortLabel: 'مفاجآت وولاء',
+    badgeClass: 'border-[#7A1C2E]/25 bg-[#FDF2F4] text-[#5C1422]',
   },
   // Legacy fallback labels
   discount: {
     label: 'DISCOUNT — خصومات',
     shortLabel: 'خصومات',
-    badgeClass: 'border-amber-200 bg-amber-50 text-amber-800',
+    badgeClass: 'border-amber-300 bg-amber-50 text-amber-900',
   },
   free_test: {
     label: 'FREE_SERVICE — تحاليل وفحوصات وزيارات',
     shortLabel: 'تحاليل مجانية',
-    badgeClass: 'border-emerald-200 bg-emerald-50 text-emerald-800',
+    badgeClass: 'border-emerald-300 bg-emerald-50 text-emerald-900',
   },
   package: {
     label: 'FREE_SERVICE — تحاليل وفحوصات وزيارات',
     shortLabel: 'باقات فحص',
-    badgeClass: 'border-emerald-200 bg-emerald-50 text-emerald-800',
+    badgeClass: 'border-emerald-300 bg-emerald-50 text-emerald-900',
   },
   home_visit: {
     label: 'FREE_SERVICE — تحاليل وفحوصات وزيارات',
     shortLabel: 'زيارات منزلية',
-    badgeClass: 'border-emerald-200 bg-emerald-50 text-emerald-800',
+    badgeClass: 'border-emerald-300 bg-emerald-50 text-emerald-900',
   },
   gift: {
     label: 'PHYSICAL_GIFT — هدايا مادية',
     shortLabel: 'هدايا مادية',
-    badgeClass: 'border-purple-200 bg-purple-50 text-purple-800',
+    badgeClass: 'border-[#5C1422]/25 bg-[#5C1422]/8 text-[#5C1422]',
   },
 };
